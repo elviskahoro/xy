@@ -1631,6 +1631,168 @@ def test_decimate_view_updates_area_base_column():
     assert decoded_base.max() <= base.max() + 1e-3
 
 
+def _notched_area_fixture(n: int, px: int, value: float = -50.0):
+    """An area fill whose baseline has within-bucket dips that are NOT y-extrema.
+
+    `n` is chosen so pixel-column buckets land on integer row boundaries; the
+    baseline is flat (0) with a single notch at the *middle* row of every
+    bucket. `y` is strictly increasing, so y-only M4 keeps only each bucket's
+    first and last rows and drops every notch — the renderer then
+    interpolates the lower edge straight across the dip. This is the
+    data-fidelity bug the area/error_band base-aware M4 selection fixes.
+    """
+    assert n % px == 0 and n > DECIMATION_THRESHOLD
+    x = np.arange(n, dtype=np.float64)
+    y = np.arange(n, dtype=np.float64)
+    base = np.zeros(n, dtype=np.float64)
+    base[np.arange(n // px // 2, n, n // px)] = value
+    return x, y, base
+
+
+def test_area_decimated_payload_preserves_independent_base_extrema():
+    """First-paint M4 for area keeps the base edge's within-bucket extrema."""
+    n = 10240
+    px = 2048
+    x, y, base = _notched_area_fixture(n, px)
+    fig = Figure().area(x, y, base=base)
+    spec, blob = fig.build_payload(px_width=px)
+    tr = spec["traces"][0]
+    assert tr["tier"] == "decimated"
+    bv = _decoded_payload_col(spec, blob, tr["base"])
+    assert tr["n_marks"] == len(bv)
+    assert bv.min() <= base.min() + 1e-3
+    assert bv.max() >= base.max() - 1e-3
+    assert np.count_nonzero(bv <= base.min() + 1e-3) > 0
+
+
+def test_error_band_decimated_payload_preserves_independent_base_extrema():
+    """error_band routes through `_emit_area`; its `lower` is the area `base`."""
+    n = 10240
+    px = 2048
+    x, _y_used, base = _notched_area_fixture(n, px)
+    upper = np.arange(n, dtype=np.float64)  # strictly increasing -> y-only drops mid-bucket rows
+    fig = Figure().error_band(x, base, upper)
+    spec, blob = fig.build_payload(px_width=px)
+    tr = spec["traces"][0]
+    assert tr["kind"] == "error_band"
+    assert tr["tier"] == "decimated"
+    bv = _decoded_payload_col(spec, blob, tr["base"])
+    assert bv.min() <= base.min() + 1e-3
+    assert np.count_nonzero(bv <= base.min() + 1e-3) > 0
+
+
+def test_area_decimated_payload_preserves_base_extrema_on_log_x_axis():
+    """The nonlinear-x M4 path (`_binning_coords`) is also base-aware."""
+    n = 10240
+    px = 2048
+    x_lin, y, base = _notched_area_fixture(n, px)
+    x = x_lin + 1.0  # positive so log-x bucketing is valid
+    fig = Figure().area(x, y, base=base)
+    fig.set_axis("x", type_="log")
+    spec, blob = fig.build_payload(px_width=px)
+    tr = spec["traces"][0]
+    assert tr["tier"] == "decimated"
+    bv = _decoded_payload_col(spec, blob, tr["base"])
+    assert bv.min() <= base.min() + 1e-3
+    assert np.count_nonzero(bv <= base.min() + 1e-3) > 0
+
+
+def test_decimate_view_preserves_independent_base_extrema_for_area():
+    """Zoom re-decimation (`interaction.decimate_view`) is base-aware too."""
+    n = 10240
+    px = 2048
+    x, y, base = _notched_area_fixture(n, px)
+    fig = Figure().area(x, y, base=base)
+    update, buffers = fig.decimate_view(float(x[0]), float(x[-1]), px)
+    assert len(update["traces"]) == 1
+    upd = update["traces"][0]
+    assert upd["x"]["len"] == upd["y"]["len"] == upd["base"]["len"]
+    decoded_base = (
+        np.frombuffer(buffers[upd["base"]["buf"]], dtype=np.float32).astype(np.float64)
+        + upd["base"]["offset"]
+    )
+    assert decoded_base.min() <= base.min() + 1e-3
+    assert np.count_nonzero(decoded_base <= base.min() + 1e-3) > 0
+
+
+def test_decimated_area_with_degenerate_baseline_is_unchanged():
+    """`base = y - 2.0` made base extrema coincide with y's — still correct."""
+    n = DECIMATION_THRESHOLD + 1
+    px = 512
+    x = np.arange(n, dtype=np.float64)
+    y = np.sin(x * 0.01)
+    base = y - 2.0
+    fig = Figure().area(x, y, base=base)
+    spec, blob = fig.build_payload(px_width=px)
+    tr = spec["traces"][0]
+    assert tr["tier"] == "decimated"
+    bv = _decoded_payload_col(spec, blob, tr["base"])
+    assert bv.min() >= base.min() - 1e-3
+    assert bv.max() <= base.max() + 1e-3
+
+
+def test_decimated_line_payload_unaffected_by_area_base_awareness():
+    """Line traces have no base column; M4 stays y-keyed (regression guard)."""
+    from xy import kernels
+
+    n = DECIMATION_THRESHOLD + 1
+    px = 256
+    x = np.arange(n, dtype=np.float64)
+    y = np.arange(n, dtype=np.float64)
+    fig = Figure().line(x, y)
+    spec, blob = fig.build_payload(px_width=px)
+    tr = spec["traces"][0]
+    assert tr["tier"] == "decimated"
+    eps = float(np.finfo(np.float64).eps)
+    xr = fig._range("x")
+    expected = kernels.m4_indices(x, y, xr[0], xr[1] + eps, px)
+    yv = _decoded_payload_col(spec, blob, tr["y"])
+    assert tr["n_marks"] == len(expected)
+    np.testing.assert_array_equal(yv, y[expected])
+
+
+def test_m4_area_indices_is_sorted_union_of_y_and_base_extrema():
+    """The kernel helper ships the union (sorted, dedup) of both edges' extrema."""
+    from xy import kernels
+
+    px = 2048
+    n = 10240
+    x = np.arange(n, dtype=np.float64)
+    y = np.arange(n, dtype=np.float64)
+    base = np.zeros(n, dtype=np.float64)
+    base[np.arange(n // px // 2, n, n // px)] = -50.0
+    eps = float(np.finfo(np.float64).eps)
+    x0, x1 = float(x[0]), float(x[-1]) + eps
+
+    idx_y = kernels.m4_indices(x, y, x0, x1, px)
+    idx_b = kernels.m4_indices(x, base, x0, x1, px)
+    idx_union = kernels.m4_area_indices(x, y, base, x0, x1, px)
+
+    assert idx_union.dtype == np.uint32
+    np.testing.assert_array_equal(idx_union, np.union1d(idx_y, idx_b))
+    # The union strictly superset of y-keyed alone: the base notches added rows.
+    assert idx_union.size > idx_y.size
+    assert idx_union.size >= idx_b.size
+    assert idx_union.size <= idx_y.size + idx_b.size
+
+
+def test_m4_area_indices_handles_empty_either_column():
+    """A fully-NaN edge contributes nothing; the other edge's set stands."""
+    from xy import kernels
+
+    px = 64
+    n = 512
+    x = np.arange(n, dtype=np.float64)
+    y = np.full(n, np.nan, dtype=np.float64)
+    base = np.zeros(n, dtype=np.float64)
+    eps = float(np.finfo(np.float64).eps)
+    x0, x1 = float(x[0]), float(x[-1]) + eps
+
+    idx = kernels.m4_area_indices(x, y, base, x0, x1, px)
+    assert idx.dtype == np.uint32
+    assert idx.size > 0  # base-keyed extrema survive the all-NaN y edge
+
+
 def test_decimate_view_rejects_invalid_windows_and_screen_width():
     n = DECIMATION_THRESHOLD + 1
     fig = Figure().line(np.arange(n, dtype=np.float64), np.arange(n, dtype=np.float64))

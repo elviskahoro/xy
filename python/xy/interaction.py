@@ -464,17 +464,27 @@ def decimate_view(
         y_scale = fig._axis_scale(t.y_axis)
         # Bucket in scale coordinates so every bucket covers one screen strip.
         mx, (m_lo, m_hi) = fig._binning_coords(t.x_axis, t.x.values, (lo_x, hi_x))
-        idx = kernels.m4_indices(mx, t.y.values, m_lo, m_hi, max(16, px_width))
+        has_base = t.kind == "area" and t.base is not None
+        # M4 keys on the union of y- and base-keyed per-bucket extrema so a
+        # baseline dip/spike that is not also a y first/min/max/last still
+        # ships — the renderer's lower-edge interpolation then preserves the
+        # baseline's own extrema (§5/§28 extrema-exact for BOTH fill edges).
+        if has_base:
+            idx = kernels.m4_area_indices(
+                mx, t.y.values, t.base.values, m_lo, m_hi, max(16, px_width)
+            )
+        else:
+            idx = kernels.m4_indices(mx, t.y.values, m_lo, m_hi, max(16, px_width))
         if len(idx):
             xv, yv = t.x.values[idx], t.y.values[idx]
-            bv = t.base.values[idx] if t.kind == "area" and t.base is not None else None
+            bv = t.base.values[idx] if has_base else None
             if bv is not None:
                 sel = np.flatnonzero(np.isfinite(bv))
                 if len(sel) != len(xv):
                     xv, yv, bv = xv[sel], yv[sel], bv[sel]
         else:
             xv, yv = t.x.values[:0], t.y.values[:0]
-            bv = t.base.values[:0] if t.kind == "area" and t.base is not None else None
+            bv = t.base.values[:0] if has_base else None
         x_col = lod.encode_f32_values(xv, lod.geometry_offset(x_scale, lo_x, hi_x), lo_x, hi_x)
         y_col = lod.encode_f32_values(
             yv, lod.geometry_offset(y_scale, t.y.min, t.y.max), t.y.min, t.y.max

@@ -590,7 +590,14 @@ class PayloadMixin(_Host):
         On a nonlinear x axis the buckets are laid out in scale coordinates so
         each bucket covers a uniform strip of *screen*, not of raw data (§28);
         monotone transforms keep per-bucket min/max rows identical, so y stays
-        raw and the gathered rows ship untransformed."""
+        raw and the gathered rows ship untransformed.
+
+        For area/error_band fills `arrays` carries a third column — the fill's
+        `base` (lower edge). M4 selection is then keyed on the union of the
+        per-bucket extrema of BOTH `y` and `base`: a bucket's base min/max row
+        is kept even when it is not also a y first/min/max/last, so the
+        renderer's lower-edge interpolation no longer clips the baseline
+        (§5/§28 extrema-exact guarantee restored for both edges)."""
         if self.coords == "polar":
             # M4 buckets on a monotonic screen-x column. Under polar the x
             # column is an angle: a spiral revisits the same screen columns and
@@ -603,15 +610,34 @@ class PayloadMixin(_Host):
         eps = float(np.finfo(np.float64).eps)
         mx, (m0, m1) = self._binning_coords(t.x_axis, arrays[0], xr)
         if mx is not arrays[0]:
-            idx = kernels.m4_indices(mx, arrays[1], m0, m1 + eps, px_width)
+            idx = self._m4_select(arrays, mx, m0, m1 + eps, px_width)
             return "decimated", tuple(a[idx] for a in arrays)
         if len(arrays) == 2:
             selected = _native.m4_points(arrays[0], arrays[1], xr[0], xr[1] + eps, px_width)
             return "decimated", selected
-        idx = kernels.m4_indices(arrays[0], arrays[1], xr[0], xr[1] + eps, px_width)
+        idx = self._m4_select(arrays, arrays[0], xr[0], xr[1] + eps, px_width)
         if len(idx):
             return "decimated", tuple(a[idx] for a in arrays)
         return "decimated", tuple(a[:0] for a in arrays)
+
+    @staticmethod
+    def _m4_select(
+        arrays: tuple[np.ndarray, ...],
+        x: np.ndarray,
+        x0: float,
+        x1: float,
+        n_buckets: int,
+    ) -> np.ndarray:
+        """Per-bucket M4 indices for one trace's parallel value columns.
+
+        Line traces pass `(x, y)` and key M4 on `y` only. Area/error_band
+        traces pass `(x, y, base)` and key M4 on the union of `y` and `base`
+        per-bucket extrema so the fill's lower edge keeps its own dips/spikes
+        (see `_m4_decimate`).
+        """
+        if len(arrays) >= 3:
+            return kernels.m4_area_indices(x, arrays[1], arrays[2], x0, x1, n_buckets)
+        return kernels.m4_indices(x, arrays[1], x0, x1, n_buckets)
 
     def _emit_line(
         self, t: Trace, pw: "_PayloadWriter", xr: tuple, yr: tuple, px_width: int
