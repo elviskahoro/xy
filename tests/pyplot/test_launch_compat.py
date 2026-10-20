@@ -487,6 +487,126 @@ def test_alpha_and_color_on_a_filled_patch_reach_its_outline() -> None:
     assert {entry["kwargs"]["color"] for entry in ax._entries} == {"green"}
 
 
+def _markered_line_entries(ax: plt.Axes) -> list[dict]:
+    """The (line, scatter-overlay) pair emitted by ``plot(..., marker=...)``."""
+    return [entry for entry in ax._entries if entry["kind"] in ("line", "@mark", "scatter")]
+
+
+def test_removing_a_markered_line_takes_its_marker_overlay_with_it() -> None:
+    _fig, ax = plt.subplots()
+    (line,) = ax.plot([0, 1, 2], [0, 1, 2], marker="o")
+    # A line plus its adjacent scatter marker overlay — the overlay is the
+    # `_legend_skip` entry, so it must not survive the handle's removal.
+    assert [entry["kind"] for entry in ax._entries] == ["line", "scatter"]
+    assert ax._entries[1].get("_legend_skip") is True
+    line.remove()
+    assert ax._entries == []
+
+
+def test_removing_a_markered_line_leaves_other_lines_and_their_markers_intact() -> None:
+    _fig, ax = plt.subplots()
+    (first,) = ax.plot([0, 1], [0, 1], marker="o")
+    (second,) = ax.plot([0, 1], [1, 2], marker="s")
+    first.remove()
+    # Only first's line+overlay are gone; second's pair is untouched and the
+    # handle still owns both its entries.
+    assert [entry["kind"] for entry in ax._entries] == ["line", "scatter"]
+    assert second._entry is ax._entries[0]
+    assert second._marker_entries()[0] is ax._entries[1]
+
+
+def test_hiding_a_markered_line_hides_its_markers_too() -> None:
+    _fig, ax = plt.subplots()
+    (line,) = ax.plot([0, 1], [2, 3], marker="o")
+    line.set_visible(False)
+    # Hiding only the line left the markers fully opaque, so a "hidden" line
+    # was still a row of dots on screen.
+    assert [entry["kwargs"]["opacity"] for entry in ax._entries] == [0.0, 0.0]
+    assert line.get_visible() is False
+    line.set_visible(True)
+    assert [entry["kwargs"]["opacity"] for entry in ax._entries] == [1.0, 1.0]
+
+
+def test_alpha_on_a_markered_line_fades_its_markers_too() -> None:
+    _fig, ax = plt.subplots()
+    (line,) = ax.plot([0, 1], [3, 4], marker="o")
+    line.set_alpha(0.5)
+    assert [entry["kwargs"]["opacity"] for entry in ax._entries] == [0.5, 0.5]
+    # Hiding after fading remembers the faded opacity, and re-showing restores
+    # it on both the line and the markers — not just the line.
+    line.set_visible(False)
+    assert [entry["kwargs"]["opacity"] for entry in ax._entries] == [0.0, 0.0]
+    assert line.get_alpha() == 0.5
+    line.set_visible(True)
+    assert [entry["kwargs"]["opacity"] for entry in ax._entries] == [0.5, 0.5]
+
+
+def test_color_on_a_markered_line_paints_its_markers_too() -> None:
+    _fig, ax = plt.subplots()
+    (line,) = ax.plot([0, 1], [5, 6], marker="o")
+    line.set_color("green")
+    # Matplotlib's Line2D.set_color recolors the line and its markers alike.
+    assert {entry["kwargs"]["color"] for entry in ax._entries} == {"green"}
+
+
+def test_zorder_on_a_markered_line_moves_its_markers_too_and_keeps_them_adjacent() -> None:
+    _fig, ax = plt.subplots()
+    (line,) = ax.plot([0, 1], [7, 8], marker="o")
+    line.set_zorder(5)
+    # The overlay must ride on the line's zorder layer, otherwise set_zorder's
+    # re-sort of _entries would split the pair and break the adjacency the
+    # overlay is located by.
+    assert [entry.get("_zorder") for entry in ax._entries] == [5.0, 5.0]
+    assert [entry["kind"] for entry in ax._entries] == ["line", "scatter"]
+    assert line._marker_entries()[0] is ax._entries[1]
+
+
+def test_transforming_a_markered_line_moves_its_markers_too() -> None:
+    from xy.pyplot._transforms import Affine2D
+
+    _fig, ax = plt.subplots()
+    (line,) = ax.plot([0, 1, 2], [0, 1, 2], marker="o")
+    line.set_transform(Affine2D().translate(10, 0))
+    line_entry, overlay = ax._entries
+    # The markers must ride the line's transform exactly once — not be left at
+    # the old positions, and not be transformed twice into the wrong place.
+    np.testing.assert_allclose(line_entry["x"], [10, 11, 12])
+    np.testing.assert_allclose(overlay["x"], [10, 11, 12])
+    np.testing.assert_allclose(line.get_xdata(), [10, 11, 12])
+
+
+def test_removing_a_marker_only_line_clears_its_single_entry() -> None:
+    _fig, ax = plt.subplots()
+    (line,) = ax.plot([0, 1], [1, 2], "o")
+    assert [entry["kind"] for entry in ax._entries] == ["scatter"]
+    line.remove()
+    assert ax._entries == []
+
+
+def test_removing_a_markerless_line_clears_its_single_entry() -> None:
+    _fig, ax = plt.subplots()
+    (line,) = ax.plot([0, 1], [1, 2])
+    assert [entry["kind"] for entry in ax._entries] == ["line"]
+    line.remove()
+    assert ax._entries == []
+
+
+def test_markered_line_lifecycle_mutations_reach_rendered_output() -> None:
+    fig, ax = plt.subplots()
+    (line,) = ax.plot([0, 1], [0, 1], marker="o")
+    line.set_alpha(0.5)
+    traces = ax._build_chart(640, 480).figure().traces
+    opacities = {trace.style["opacity"] for trace in traces}
+    # Both the line trace and the marker trace must carry the faded opacity,
+    # not just the line.
+    assert opacities == {0.5}
+    line.set_visible(False)
+    fig._chart = None
+    traces = ax._build_chart(640, 480).figure().traces
+    # A hidden markered line renders neither its stroke nor its markers.
+    assert {trace.style["opacity"] for trace in traces} == {0.0}
+
+
 def test_transforming_a_filled_patch_moves_its_outline_too() -> None:
     pytest.importorskip("matplotlib")
     from matplotlib.patches import Rectangle
