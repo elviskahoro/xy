@@ -9,6 +9,7 @@ import pytest
 
 import xy
 from reflex_xy.registry import FigureRegistry
+from reflex_xy.tokens import build_data_token, build_plan_token
 
 
 def make_figure(n: int = 16):
@@ -496,3 +497,212 @@ def test_len_and_tokens(_fresh_registry, n):
     tokens = {registry.register(make_figure()) for _ in range(n)}
     assert len(registry) == n
     assert set(registry.tokens()) == tokens
+
+
+# -- data-bound tier: atomic plan binding on rebuild-attempt -----------------
+
+
+_CLIENT = "11111111-2222-4333-8444-555566667777"
+
+
+def _plan_composite():
+    """A composite plan token + its (data_token, digest) identity."""
+    data_token = build_data_token(_CLIENT, "app.Demo", "cloud")
+    digest = "deadbeef" * 4
+    return build_plan_token(digest, data_token), data_token, digest
+
+
+def test_publish_if_missing_without_plan_bound_does_not_index_digest(_fresh_registry):
+    """Backward compatibility: the new ``plan_bound`` kwarg is opt-in. Plain
+    ``publish_if_missing`` (state-token rebuilds, tests) must NOT touch the
+    data-token → {digest} index."""
+    registry = _fresh_registry
+    composite, _data_token, _digest = _plan_composite()
+    missing, guard = registry.begin_rebuild(composite)
+    assert missing is None and guard is not None
+
+    entry, inserted = registry.publish_if_missing(composite, make_figure(8), guard=guard)
+    registry.finish_rebuild(composite, guard)
+    assert inserted
+    assert entry is not None
+    # No plan_bound -> the composite's digest is NOT in the fan-out index.
+    assert registry._digests_by_data_token == {}
+
+
+def test_publish_if_missing_binds_plan_atomically_with_insert(_fresh_registry):
+    """The cold-subscribe race fix: a composite plan's digest is inserted into
+    ``_digests_by_data_token`` UNDER THE SAME mutex hold as the entry's
+    insertion, so any ``publish_columns`` that observes the new entry also
+    observes its digest and rebuilds this plan. Without atomicity a republish
+    landing between the insert and the (now-removed) ``bind_plan`` after the
+    rebuild would snapshot an empty set and silently never fan out."""
+    registry = _fresh_registry
+    composite, data_token, digest = _plan_composite()
+    missing, guard = registry.begin_rebuild(composite)
+    assert missing is None and guard is not None
+
+    # Observe the index in the same critical window a concurrent
+    # publish_columns would: it must be empty BEFORE the insert, present
+    # atomically WITH the entry. We cannot interleave pure-python under the
+    # mutex, so the contract is: after publish_if_missing returns, BOTH
+    # the entry and the index are visible together (never one without the
+    # other).
+    assert registry._digests_by_data_token.get(data_token) is None
+    assert registry.get(composite) is None
+
+    entry, inserted = registry.publish_if_missing(
+        composite, make_figure(8), guard=guard, plan_bound=(data_token, digest)
+    )
+    registry.finish_rebuild(composite, guard)
+
+    assert inserted
+    assert entry is not None
+    assert registry.get(composite) is entry
+    # The digest landed in the index together with the entry — no window
+    # where the entry is observable but the digest is not.
+    assert registry._digests_by_data_token.get(data_token) == {digest}
+
+
+def test_publish_if_missing_plan_bound_pre_existing_entry_does_not_re_bind(
+    _fresh_registry,
+):
+    """When ``publish_if_missing`` returns a pre-existing entry (a concurrent
+    publisher won while the rebuild awaited user code), it MUST NOT touch the
+    digest index: that publisher's own path owns the index invariant. Only a
+    generation this call inserts is bound here."""
+    registry = _fresh_registry
+    composite, data_token, digest = _plan_composite()
+    other_digest = "cafe" * 8
+
+    # Step 1: cold miss -> guard the rebuild attempt.
+    missing, guard = registry.begin_rebuild(composite)
+    assert missing is None and guard is not None
+    # An unrelated plan was already bound for this data token.
+    registry.bind_plan(data_token, other_digest)
+    assert registry._digests_by_data_token.get(data_token) == {other_digest}
+
+    # Step 2: a canonical publisher wins the race while the rebuild awaited
+    # user code (this is the _run_rebuild_attempt path where rebuild() returns
+    # a figure but a sibling publish_columns triggered _rebuild_dependent and
+    # already published the composite).
+    pre_existing = registry.publish(composite, make_figure(8), broadcast=False)
+
+    # Step 3: the rebuild's publish_if_missing now finds the entry present.
+    entry, inserted = registry.publish_if_missing(
+        composite, make_figure(32), guard=guard, plan_bound=(data_token, digest)
+    )
+    registry.finish_rebuild(composite, guard)
+
+    assert not inserted
+    assert entry is pre_existing
+    # The pre-existing-entry path leaves the index exactly as the canonical
+    # publisher left it: ``digest`` is NOT silently added by this rebuild.
+    assert registry._digests_by_data_token.get(data_token) == {other_digest}
+
+
+def test_publish_if_missing_plan_bound_invalid_guard_does_not_index(_fresh_registry):
+    """An invalidated guard (a canonical release/publish won while the rebuild
+    awaited user code) returns ``(None, False)`` and MUST NOT index a digest
+    for an entry that was never inserted — otherwise the digest would dangle
+    forever on a token with no figure."""
+    registry = _fresh_registry
+    composite, data_token, digest = _plan_composite()
+    missing, guard = registry.begin_rebuild(composite)
+    assert missing is None and guard is not None
+
+    # A canonical release invalidates the guard and leaves the token absent.
+    registry.release(composite)
+
+    entry, inserted = registry.publish_if_missing(
+        composite, make_figure(8), guard=guard, plan_bound=(data_token, digest)
+    )
+    registry.finish_rebuild(composite, guard)
+
+    assert entry is None
+    assert not inserted
+    assert registry.get(composite) is None
+    assert registry._digests_by_data_token.get(data_token) is None
+
+
+def test_publish_if_missing_plan_bound_reaped_by_failed_broadcast_cleanup(
+    _fresh_registry,
+):
+    """A binding added by an attempt that ultimately fails (broadcast_payload
+    raises -> remove_if_current) is reaped by ``_unbind_plan_if_unmounted_locked``
+    exactly like any other unmount transition. With no subscriber yet (subscribe
+    runs after the attempt), the binding must vanish with the entry."""
+    registry = _fresh_registry
+    composite, data_token, digest = _plan_composite()
+    missing, guard = registry.begin_rebuild(composite)
+    assert missing is None and guard is not None
+
+    entry, inserted = registry.publish_if_missing(
+        composite, make_figure(8), guard=guard, plan_bound=(data_token, digest)
+    )
+    assert inserted
+
+    # Simulate the namespace's failed-broadcast cleanup path: no subscribers
+    # were registered yet (subscribe runs after the attempt in on_sub), so
+    # remove_if_current unbinds the plan atomically with removing the entry.
+    assert registry.remove_if_current(composite, entry, guard=guard)
+    registry.finish_rebuild(composite, guard)
+
+    assert registry.get(composite) is None
+    assert registry._digests_by_data_token.get(data_token) is None
+    assert registry._evicted_versions == {}
+
+
+def test_publish_columns_observes_plan_bound_from_concurrent_rebuild_attempt(
+    _fresh_registry,
+):
+    """End-to-end at the registry layer: a publish_columns that runs AFTER a
+    rebuild attempt's publish_if_missing (so the entry is observable) MUST
+    also observe the digest in the index, and so must fan out via
+    ``_rebuild_dependent``. This is the exact ordering the race used to break:
+    without the atomic bind, publish_columns would snapshot an empty digest
+    set and silently never rebuild this plan."""
+    registry = _fresh_registry
+    composite, data_token, digest = _plan_composite()
+    # Prime v1 columns so the rebuild's snapshot is deterministic.
+    v1_columns = {"x": np.linspace(0.0, 1.0, 24), "y": np.linspace(0.0, 1.0, 24) * 2.0}
+    v2_columns = {"x": np.linspace(0.0, 1.0, 5), "y": np.linspace(0.0, 1.0, 5) * 2.0}
+    registry.publish_columns(data_token, v1_columns)
+
+    # A rebuild attempt pumps a figure from v1 and binds the digest
+    # atomically with the insert.
+    missing, guard = registry.begin_rebuild(composite)
+    assert missing is None and guard is not None
+    figure_v1 = xy.scatter_chart(xy.scatter(v1_columns["x"], v1_columns["y"])).figure()
+    entry, inserted = registry.publish_if_missing(
+        composite, figure_v1, guard=guard, plan_bound=(data_token, digest)
+    )
+    assert inserted
+    registry.finish_rebuild(composite, guard)
+
+    # A column republish lands here (the racing window). With the fix it
+    # sees the now-bound digest and rebuilds the composite from v2; without
+    # the fix the digest set was empty and the republish silently dropped.
+    # We stub ``_rebuild_dependent`` to record the fan-out call without
+    # running the plan bind (the unregistered digest would otherwise raise
+    # PlanMissError); the dispatch observability is what we assert here.
+    rebuilt_called = []
+    real_rebuild_dependent = registry._rebuild_dependent
+
+    def tracking_rebuild_dependent(data_token_, digest_, column_entry_):
+        rebuilt_called.append((data_token_, digest_, column_entry_.version))
+        # Don't run the real path: there's no registered plan for this digest.
+
+    registry._rebuild_dependent = tracking_rebuild_dependent
+    try:
+        registry.publish_columns(data_token, v2_columns)
+    finally:
+        registry._rebuild_dependent = real_rebuild_dependent
+
+    # The republish fanned out to this plan precisely once, from v2 columns.
+    assert rebuilt_called == [(data_token, digest, 2)]
+    # The v2 columns are now canonical. The composite entry remains the one
+    # the rebuild attempt inserted (the stub didn't rebuild the figure);
+    # the next publish_columns against a *registered* plan would replace it.
+    assert registry.get_columns(data_token).version == 2
+    assert registry.get(composite) is entry
+    assert registry._digests_by_data_token.get(data_token) == {digest}
