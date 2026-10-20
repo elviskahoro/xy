@@ -71,6 +71,59 @@ def test_reset_view_and_clear_selection_push(_fresh_registry):
     assert pushed[1][1]["state"]["selection"] is None
 
 
+def test_clear_selection_records_eagerly_without_client_echo(_fresh_registry):
+    # The Reflex transport's clear_selection pushes a fire-and-forget
+    # state_patch(selection=None) and depends on the client's `select_clear`
+    # echo to feed the kernel's durable cache. That echo is suppressed when
+    # the `select` interaction flag is off (interaction.select=False, or any
+    # polar chart), and in the headless/test path it never arrives at all.
+    # The registry must therefore record the clear eagerly — mirroring the
+    # widget — or view_state()['selection'] stays frozen at whatever the
+    # last committed selection set the cache to.
+    registry = _fresh_registry
+    fig = make_figure()
+    token = registry.register(fig)
+    # A prior committed selection the hypothetical client reported. The
+    # select-set echo is un-gated, so it reaches the kernel cache via the
+    # dispatcher the same way as the widget path.
+    from xy.channel import handle_message
+
+    handle_message(fig, {"type": "select", "x0": 0.2, "x1": 0.8, "y0": 0.0, "y1": 2.0})
+    assert fig.view_state()["selection"] == {"range": {"x0": 0.2, "x1": 0.8, "y0": 0.0, "y1": 2.0}}
+
+    # No wired push seam and no client echo: the eager record is the only
+    # writer that fires on this path. The message is built (validated) and
+    # the cache is cleared, without anyone to fan the bytes out to.
+    registry.clear_selection(token)
+    assert fig.view_state()["selection"] is None
+
+
+def test_clear_selection_pushes_state_patch_and_records_eagerly(_fresh_registry):
+    # The eager kernel-side record is a cache write only — it must not change
+    # the wire shape or the message count the existing push test pins down.
+    # The pushed state_patch still carries selection=None exactly once, with
+    # the generation it was built against (no payload rebuild, no bump).
+    registry = _fresh_registry
+    fig = make_figure()
+    token = registry.register(fig)
+    from xy.channel import handle_message
+
+    handle_message(fig, {"type": "select", "x0": 0.1, "x1": 0.9, "y0": 0.0, "y1": 2.0})
+    assert fig.view_state()["selection"] is not None
+
+    run, pushed = _wired(registry)
+    run(lambda: registry.clear_selection(token))
+    ((pushed_token, message, buffers, generation),) = pushed
+    assert pushed_token == token
+    assert message["type"] == "state_patch"
+    assert message["state"]["selection"] is None
+    assert buffers == []
+    assert generation == 1
+    assert registry.get(token).version == 1
+    # The durable cache is cleared eagerly — no client echo was fed back.
+    assert fig.view_state()["selection"] is None
+
+
 def test_select_geometric_and_rows(_fresh_registry):
     registry = _fresh_registry
     fig = make_figure()

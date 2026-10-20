@@ -898,8 +898,21 @@ class FigureRegistry:
         self.push_view_message(token, build)
 
     def clear_selection(self, token: str) -> None:
-        """Room-wide selection clear."""
-        self.push_view_message(token, lambda fig: (fig.state_patch_message(selection=None), []))
+        """Room-wide selection clear.
+
+        Records the clear eagerly kernel-side so the durable ``view_state()``
+        cache tracks it even on clients whose ``select`` interaction flag
+        suppresses the ``select_clear`` echo (every polar chart, or
+        ``interaction.select=False``); mirrors ``FigureWidget.clear_selection``
+        and the ``rows=`` path in ``select`` — both record eagerly because no
+        unconditional echo exists for them (view-state.md §5.1).
+        """
+
+        def build(fig: "Figure") -> tuple[dict, list[bytes]]:
+            fig._record_selection(None)
+            return fig.state_patch_message(selection=None), []
+
+        self.push_view_message(token, build)
 
     # -- TTL sweep -----------------------------------------------------------
 

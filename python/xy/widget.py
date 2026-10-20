@@ -175,7 +175,17 @@ class FigureWidget(anywidget.AnyWidget):
         self.send(self._figure.state_patch_message(selection=selection, history=history))
 
     def clear_selection(self) -> None:
-        """Clear any selection (durable: history records it)."""
+        """Clear any selection (durable: history records it).
+
+        Records the clear eagerly kernel-side: the client's ``select_clear``
+        echo (the only other writer of the durable cache on this path) is
+        suppressed when the ``select`` interaction flag is off — including
+        every polar chart — so without an eager record the kernel cache
+        would stay frozen at the last selection range (view-state.md §5.1).
+        Mirrors the ``rows=`` path in ``select``, which records eagerly for
+        the same reason (no echo exists).
+        """
+        self._figure._record_selection(None)
         self.send(self._figure.state_patch_message(selection=None))
 
     def view_state(self) -> dict[str, Any]:
