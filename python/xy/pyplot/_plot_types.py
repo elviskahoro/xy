@@ -4871,7 +4871,20 @@ class PlotTypeMixin:
             groups = list(arr)
         else:
             groups = list(source)
-        offsets = _sequence_param(lineoffsets, len(groups), "lineoffsets")
+        # Matplotlib treats a scalar (or length-1) ``lineoffsets`` as a stride
+        # and cumulatively staggers one row per dataset when there is more than
+        # one dataset; only an explicit per-dataset sequence is honored verbatim.
+        offsets_value: Any = lineoffsets
+        if isinstance(offsets_value, str) or np.isscalar(offsets_value):
+            raw_offsets: list[Any] = [offsets_value]
+        else:
+            raw_offsets = list(offsets_value)
+        if len(raw_offsets) == 1 and len(groups) != 1:
+            offsets = np.tile(float(raw_offsets[0]), len(groups))
+            offsets[0] = 0.0
+            offsets = offsets.cumsum().tolist()
+        else:
+            offsets = _sequence_param(lineoffsets, len(groups), "lineoffsets")
         lengths = _sequence_param(linelengths, len(groups), "linelengths")
         widths = _sequence_param(
             1.5 if linewidths is None else linewidths, len(groups), "linewidths"
