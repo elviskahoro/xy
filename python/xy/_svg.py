@@ -3506,7 +3506,6 @@ def _polar_wedge_path(
     # `sweep` is in SVG's screen sense: y grows downward, so a counterclockwise
     # data sweep draws as a clockwise-negative arc.
     sweep = 0 if a1 > a0 else 1
-    large = 1 if abs(a1 - a0) > math.pi else 0
 
     def at(radius: float, angle: float) -> tuple[float, float]:
         return polar.cx + radius * math.cos(angle), polar.cy - radius * math.sin(angle)
@@ -3534,20 +3533,30 @@ def _polar_wedge_path(
     # lines a fixed distance apart, which `L` already draws.
     inset = _wedge_edge_inset(wedge_gap, a0, a1)
     d_out, d_in = inset(outer), inset(max(inner, 1e-9))
+    # The `large` arc flag selects the >180°/ <180° candidate for a given pair
+    # of endpoints, radius, and sweep direction. It must be derived from the
+    # separation of the endpoints the arc actually connects — which are the
+    # gap-insetted angles, not the raw wedge span — or a raw span just over π
+    # whose insetted separation drops below π resolves to the circle mirrored
+    # across the chord (center off the polar center) and the rim sags off the
+    # true rim. The inner radius pays a bigger angular inset for the same px
+    # gap (`gap / (2r)`), so each arc needs its own flag.
+    large_out = 1 if abs((a1 - d_out) - (a0 + d_out)) > math.pi else 0
+    large_in = 1 if abs((a1 - d_in) - (a0 + d_in)) > math.pi else 0
     ox0, oy0 = at(outer, a0 + d_out)
     ox1, oy1 = at(outer, a1 - d_out)
     if inner <= 0.0:
         return (
             f"M {_num(polar.cx)} {_num(polar.cy)} L {_num(ox0)} {_num(oy0)} "
-            f"A {_num(outer)} {_num(outer)} 0 {large} {sweep} {_num(ox1)} {_num(oy1)} Z"
+            f"A {_num(outer)} {_num(outer)} 0 {large_out} {sweep} {_num(ox1)} {_num(oy1)} Z"
         )
     ix1, iy1 = at(inner, a1 - d_in)
     ix0, iy0 = at(inner, a0 + d_in)
     return (
         f"M {_num(ox0)} {_num(oy0)} "
-        f"A {_num(outer)} {_num(outer)} 0 {large} {sweep} {_num(ox1)} {_num(oy1)} "
+        f"A {_num(outer)} {_num(outer)} 0 {large_out} {sweep} {_num(ox1)} {_num(oy1)} "
         f"L {_num(ix1)} {_num(iy1)} "
-        f"A {_num(inner)} {_num(inner)} 0 {large} {1 - sweep} {_num(ix0)} {_num(iy0)} Z"
+        f"A {_num(inner)} {_num(inner)} 0 {large_in} {1 - sweep} {_num(ix0)} {_num(iy0)} Z"
     )
 
 

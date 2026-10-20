@@ -1,0 +1,1 @@
+SVG exports of slightly-more-than-half pie or donut slices with a nonzero wedge gap no longer sag off the chart rim. The arc's `large` flag is now taken from the gap-insetted span the arc actually draws rather than the raw slice span, so the static SVG rim matches the PNG and interactive renderers instead of resolving to the mirror circle several pixels off the polar center.
