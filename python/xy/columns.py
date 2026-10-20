@@ -546,6 +546,8 @@ def _arrow_to_numpy(data: Any) -> tuple[npt.NDArray[Any], int] | None:
         except Exception:
             pass  # non-primitive layout (strings, dictionaries…): fall through
     kind = str(data.type)
+    if kind == "bool":
+        raise ValueError("columns must be real numeric or datetime-like, not boolean")
     if not (kind.startswith("timestamp") or kind.startswith("date")):
         try:
             cast = data.cast("float64")
