@@ -1,0 +1,1 @@
+Recognize matplotlib's documented "no marker" family ("none", "None", "", " ") in ``marker_render_spec`` so ``plot``/``scatter``/``errorbar``/``axhline``/``axvline`` draw no markers instead of raising ``ValueError: unsupported marker``. ``marker=None`` still means "use the default marker".
