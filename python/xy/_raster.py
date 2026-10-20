@@ -2204,7 +2204,10 @@ def _emit_scatter(
         affine_fast_path(sx, sy, polar)
         and not t.get("channels")
         and (t.get("stroke") is None or t["stroke"].get("mode") == "match_fill")
-        and (color_mode in {"continuous", "categorical"} or size_mode == "continuous")
+        and (
+            color_mode in {"continuous", "categorical"}
+            or (size_mode == "continuous" and color_mode != "direct_rgba")
+        )
     ):
         paint = _parse_color(_css(ch.get("color"), color))
         alpha = max(0, min(255, int(round(fill_op * paint[3]))))

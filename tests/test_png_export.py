@@ -857,6 +857,28 @@ def test_static_scatter_affine_fast_path_keeps_general_fallbacks(monkeypatch) ->
     assert _raster.render_raster(*log_axis.build_payload(), scale=1).shape == (140, 240, 4)
     assert (constant_calls, channel_calls) == (1, 2)
 
+    # Regression: per-point RGBA colors with a continuous size channel must
+    # NOT enter the affine-channel fast path (whose opcode cannot encode
+    # ``direct_rgba`` and would collapse every point onto the fallback fill).
+    # The trace must fall through to the expanded ``points`` path instead.
+    rgba = np.column_stack(
+        [
+            np.linspace(1.0, 0.0, len(x)),
+            np.linspace(0.0, 1.0, len(x)),
+            np.linspace(0.0, 0.5, len(x)),
+            np.ones(len(x)),
+        ]
+    )
+    direct_rgba_sized = Figure(width=240, height=140).scatter(
+        x, np.sin(x), color=rgba, size=x, size_range=(4, 10)
+    )
+    assert _raster.render_raster(*direct_rgba_sized.build_payload(), scale=1).shape == (
+        140,
+        240,
+        4,
+    )
+    assert (constant_calls, channel_calls) == (1, 2)
+
 
 def test_affine_static_scatter_full_render_matches_expanded(monkeypatch) -> None:
     from xy import _svg
@@ -896,6 +918,22 @@ def test_affine_static_scatter_full_render_matches_expanded(monkeypatch) -> None
             x, y, color=color_values, size=size_values, size_range=(2, 8)
         ),
     ]
+    # Regression: per-point RGBA colors with a continuous size channel must
+    # render with per-point fills on the fast path exactly as on the expanded
+    # path (the affine-channel opcode cannot encode ``direct_rgba``).
+    rgba_face = np.column_stack(
+        [
+            np.linspace(1.0, 0.0, len(x)),
+            np.linspace(0.0, 1.0, len(x)),
+            np.linspace(0.0, 0.5, len(x)),
+            np.ones(len(x)),
+        ]
+    )
+    figures.append(
+        Figure(width=360, height=220).scatter(
+            x, y, color=rgba_face, size=size_values, size_range=(2, 8)
+        )
+    )
     payloads = [figure.build_payload() for figure in figures]
     direct = [_raster.render_raster(spec, blob, scale=2) for spec, blob in payloads]
     monkeypatch.setattr(_svg._Scale, "affine", property(lambda _self: False))
@@ -1073,6 +1111,95 @@ def test_scatter_direct_edges_with_colormap_c_render_in_png() -> None:
         opacity=1.0,
     )
     assert _dark_pixel_count(fig.to_png(width=300, height=200)) > 200
+
+
+def test_scatter_direct_rgba_color_with_continuous_size_renders_per_point_colors() -> None:
+    """Regression: a scatter whose face color is a per-point ``direct_rgba``
+    array and whose size is a continuous array must render each point with its
+    own color in the PNG.
+
+    The affine-channel fast path's opcode cannot encode ``direct_rgba`` (it
+    only supports constant/continuous/categorical colors), so such a trace must
+    defer to the expanded ``points`` path, which resolves the packed RGBA8
+    buffer per point.  Before the fix the size-channel disjunct routed these
+    traces through the affine-channel path, which encoded ``direct_rgba`` as
+    mode 0 (static fill) and silently painted every point with the trace's
+    fallback color.
+    """
+    names = ["red", "green", "blue", "yellow", "magenta"]
+    targets = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255)]
+    rgba = np.array(
+        [
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 1.0],
+            [1.0, 1.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0, 1.0],
+        ]
+    )
+    sizes = np.array([10.0, 12.0, 14.0, 16.0, 18.0])
+    spread_x = np.array([0.0, 2.5, 5.0, 7.5, 10.0])
+    fig = Figure(width=400, height=120).scatter(
+        spread_x,
+        np.zeros(5),
+        color=rgba,
+        size=sizes,
+        size_range=(10, 22),
+        opacity=1.0,
+    )
+    spec, blob = fig.build_payload()
+    assert spec["traces"][0]["color"]["mode"] == "direct_rgba"
+    assert spec["traces"][0]["size"]["mode"] == "continuous"
+
+    img = _decode_rgba(fig.to_png(scale=2))
+    rgb = img[..., :3].astype(np.int64)
+    counts = {}
+    for name, target in zip(names, targets, strict=True):
+        match = (
+            (np.abs(rgb[..., 0] - target[0]) < 40)
+            & (np.abs(rgb[..., 1] - target[1]) < 40)
+            & (np.abs(rgb[..., 2] - target[2]) < 40)
+        )
+        counts[name] = int(match.sum())
+    assert all(count > 0 for count in counts.values()), counts
+
+
+def test_pyplot_scatter_rgba_c_with_s_array_renders_per_point_colors() -> None:
+    """Regression: ``ax.scatter(x, y, c=rgba_array, s=sizes_array)`` reaches
+    the raster exporter as a single ``direct_rgba`` color channel plus a
+    ``continuous`` size channel (with a ``match_fill`` stroke from the default
+    edge width).  This is the primary static-export path for matplotlib-style
+    per-point-colored, per-point-sized scatters and must render per-point
+    colors, not the trace's fallback fill.
+    """
+    import xy.pyplot as plt
+
+    try:
+        _fig, ax = plt.subplots()
+        rgba = np.array(
+            [
+                [1.0, 0.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0, 1.0],
+            ]
+        )
+        ax.scatter([0, 1, 2], [0, 1, 0], c=rgba, s=[40, 60, 80])
+        core = ax._build_chart(400, 200).figure()
+        spec, _ = core.build_payload()
+        assert spec["traces"][0]["color"]["mode"] == "direct_rgba"
+        assert spec["traces"][0]["size"]["mode"] == "continuous"
+
+        img = _decode_rgba(core.to_png(scale=2))
+        rgb = img[..., :3].astype(np.int64)
+        for target in [(255, 0, 0), (0, 255, 0), (0, 0, 255)]:
+            match = (
+                (np.abs(rgb[..., 0] - target[0]) < 40)
+                & (np.abs(rgb[..., 1] - target[1]) < 40)
+                & (np.abs(rgb[..., 2] - target[2]) < 40)
+            )
+            assert int(match.sum()) > 0
+    finally:
+        plt.close("all")
 
 
 def _text_commands(monkeypatch, chart) -> dict[str, tuple[float, float]]:
