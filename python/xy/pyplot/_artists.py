@@ -320,7 +320,17 @@ class Artist:
 
 
 class Line2D(Artist):
-    """Handle for plt.plot lines (and their marker overlays)."""
+    """Handle for plt.plot lines (and their marker overlays).
+
+    ``plot(..., marker=...)`` reaches the spec as a line entry followed by an
+    adjacent scatter overlay, but matplotlib exposes one ``Line2D`` for both.
+    The overlay hangs off `_companion_entries` so the mutations that mean "the
+    whole artist" — visibility, alpha, color, zorder, removal — move it too,
+    matching the `Patch` invariant. Without that, `set_visible(False)` would
+    hide the line and leave the markers drawn, `set_alpha(0.5)` would fade the
+    line and leave the markers opaque, and `remove()` would orphan the markers
+    with no handle left to take them down.
+    """
 
     def _companion_entries(self) -> list[dict[str, Any]]:
         # The marker overlay is part of this Line2D: visibility, alpha, color,
