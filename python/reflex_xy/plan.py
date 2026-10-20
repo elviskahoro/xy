@@ -110,6 +110,36 @@ class _ProbeTable(Mapping):
         return len(self.seen)
 
 
+def _canonical_bytes(value: Any) -> bytes:
+    """A process-independent byte encoding of a fingerprint input.
+
+    ``repr(set(...))`` / ``repr(frozenset(...))`` iterate in per-process hash
+    order (``PYTHONHASHSEED``), so the raw repr of a set-bearing value — a
+    default, or a bytecode constant nesting one — is non-deterministic across
+    workers, which would make the plan digest diverge and break content
+    addressing (X4). Recurse into containers (tuple, dict, set, frozenset)
+    and sort the element encodings of set/frozenset so identical content
+    yields identical bytes regardless of the process's hash seed. Scalars and
+    ``None`` fall back to ``repr``, which is already process-independent.
+    """
+    if isinstance(value, (set, frozenset)):
+        return b"{" + b",".join(sorted(_canonical_bytes(el) for el in value)) + b"}"
+    if isinstance(value, tuple):
+        return b"(" + b",".join(_canonical_bytes(el) for el in value) + b")"
+    if isinstance(value, dict):
+        # dict iteration order is insertion order (a language guarantee), so
+        # keys are stable across processes for one source; recurse into each
+        # value in case it nests a set/frozenset.
+        return (
+            b"{"
+            + b",".join(
+                _canonical_bytes(key) + b":" + _canonical_bytes(item) for key, item in value.items()
+            )
+            + b"}"
+        )
+    return repr(value).encode()
+
+
 def _code_fingerprint(fn: Any) -> str:
     """Content hash of a pure-Python function's behavior.
 
@@ -130,16 +160,14 @@ def _code_fingerprint(fn: Any) -> str:
         for const in code.co_consts:
             if isinstance(const, types.CodeType):
                 feed(const)
-            elif isinstance(const, frozenset):
-                # frozenset repr order follows per-process string hashing;
-                # sort for a process-independent byte stream.
-                h.update(",".join(sorted(map(repr, const))).encode())
             else:
-                h.update(repr(const).encode())
+                # canonicalize: a tuple/dict constant nesting a set/frozenset
+                # would otherwise repr in per-process hash order.
+                h.update(_canonical_bytes(const))
 
     feed(fn.__code__)
-    h.update(repr(getattr(fn, "__defaults__", None)).encode())
-    h.update(repr(getattr(fn, "__kwdefaults__", None)).encode())
+    h.update(_canonical_bytes(getattr(fn, "__defaults__", None)))
+    h.update(_canonical_bytes(getattr(fn, "__kwdefaults__", None)))
     return h.hexdigest()[:16]
 
 
