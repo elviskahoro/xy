@@ -837,6 +837,7 @@ def error_band(
     name: Optional[str] = None,
     color: Optional[str] = None,
     opacity: float = 0.22,
+    line_color: Optional[str] = None,
     line_width: float = 0.0,
     line_opacity: float = 0.0,
     fill: Union[str, dict[str, str], None] = None,
@@ -857,6 +858,7 @@ def error_band(
         name: Series label used by legends and tooltips.
         color: Band color.
         opacity: Band opacity from zero to one.
+        line_color: Outline color.
         line_width: Boundary-line width in pixels.
         line_opacity: Boundary-line opacity from zero to one.
         fill: CSS fill value or linear gradient.
@@ -881,6 +883,7 @@ def error_band(
             "upper": upper,
             "color": color,
             "opacity": opacity,
+            "line_color": line_color,
             "line_width": line_width,
             "line_opacity": line_opacity,
             "fill": fill,
@@ -5867,6 +5870,7 @@ def _apply_error_band(fig: Figure, m: Mark, data: Any) -> None:
         name=m.name,
         color=m.props["color"],
         opacity=m.props["opacity"],
+        line_color=m.props["line_color"],
         line_width=m.props["line_width"],
         line_opacity=m.props["line_opacity"],
         fill=m.props["fill"],
