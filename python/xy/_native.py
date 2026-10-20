@@ -730,15 +730,6 @@ def _load() -> ctypes.CDLL:
         ctypes.c_size_t,  # w
         ctypes.c_size_t,  # h
     ]
-    lib.xy_rasterize_png.restype = ctypes.c_size_t
-    lib.xy_rasterize_png.argtypes = [
-        ctypes.c_void_p,  # cmd
-        ctypes.c_size_t,  # cmd_len
-        ctypes.c_void_p,  # out PNG bytes
-        ctypes.c_size_t,  # out_capacity
-        ctypes.c_size_t,  # w
-        ctypes.c_size_t,  # h
-    ]
     lib.xy_rasterize_data.restype = ctypes.c_int32
     lib.xy_rasterize_data.argtypes = [
         ctypes.c_void_p,  # cmd
@@ -3195,21 +3186,6 @@ def rasterize(cmds: bytes, w: int, h: int) -> npt.NDArray[np.uint8]:
     if not ok:
         raise ValueError("native rasterizer rejected the command buffer")
     return out
-
-
-def rasterize_png(cmds: bytes, w: int, h: int) -> bytes:
-    """Paint a display list and encode it as PNG wholly inside the Rust core."""
-    w = _positive_int(w, "raster width")
-    h = _positive_int(h, "raster height")
-    buf = np.frombuffer(cmds, dtype=np.uint8)
-    raw_len = operator.mul(operator.mul(w, h), 4)
-    capacity = raw_len + raw_len // 8 + 65_536
-    out = np.empty(capacity, dtype=np.uint8)
-    cmd_ptr = _ptr_u8(buf) if buf.size else None
-    written = _lib.xy_rasterize_png(cmd_ptr, buf.size, _ptr_u8(out), out.size, w, h)
-    if written == _USIZE_MAX or written > out.size:
-        raise ValueError("native raster-to-PNG encoder rejected the command buffer")
-    return out[:written].tobytes()
 
 
 def rasterize_data(cmds: bytes, data: bytes, w: int, h: int) -> npt.NDArray[np.uint8]:
