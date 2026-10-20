@@ -451,6 +451,14 @@ Object.assign(ChartView.prototype, {
       // domain (history inspection must remain stationary).
       if (this._transitionView) this._transitionView.to = { ...nextView };
       else this.view = { ...nextView };
+      // updatePayload rebuilt every GPU trace record from the unfiltered
+      // spec, dropping the transient per-view legend-toggle state
+      // (g._legendHidden, _visMap/_visInv, funnel masks, _filterDirty).
+      // Re-apply it before refining so hidden traces/categories stay hidden
+      // (interaction spec §10 — re-applied after every rebuild) and the
+      // density re-bin respects the current category mask.
+      this._reapplyLegendVisibility();
+      this._updatePickable();
       this._scheduleAppendRefine(nextView, atHome);
       return;
     }

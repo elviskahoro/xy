@@ -35,6 +35,7 @@ import xy  # noqa: E402
 from xy import channel  # noqa: E402
 from xy._figure import Figure  # noqa: E402
 from xy.export import find_chromium  # noqa: E402
+from xy.interaction import append_data  # noqa: E402
 
 
 def _density_fig(n: int = 400_000) -> tuple[Figure, np.ndarray]:
@@ -46,6 +47,28 @@ def _density_fig(n: int = 400_000) -> tuple[Figure, np.ndarray]:
     fig.scatter(x, y, color=cats, density=True)
     fig.build_payload()
     return fig, (x, y)
+
+
+def _density_category_chart_with_animation():
+    """The shared clustered density fixture with chart-level animation set so
+    streaming appends route through the animated rebuild branch."""
+    import xy
+
+    rng = np.random.default_rng(7)
+    n = 400_000
+    cat = rng.integers(0, 3, n)
+    centers = np.array([[-1.2, -0.6], [0.2, 1.1], [1.5, -0.9]])
+    x = rng.normal(centers[cat, 0], 0.4)
+    y = rng.normal(centers[cat, 1], 0.4)
+    labels = np.array(["A", "B", "C"])[cat]
+    chart = xy.scatter_chart(
+        xy.scatter(x, y, color=labels, density=True),
+        xy.animation(enabled=True, duration=400),
+        xy.legend(),
+        width=520,
+        height=340,
+    )
+    return chart, cat
 
 
 def test_legend_toggle_masks_density_rebin() -> None:
@@ -598,6 +621,255 @@ def test_browser_legend_click_toggles_series() -> None:
         ("legend_toggle", 0, None, True),
         ("legend_toggle", 0, None, False),
     ], payload["sent"]
+
+
+# --- animated streaming append must re-apply legend toggle state ------------
+
+
+_ANIMATED_APPEND_PROBE = """
+<script>
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const b64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0)).buffer;
+  try {
+    const view = window.__fcProbeView;
+    if (!view) throw new Error("no probe view captured");
+    view._drawNow();
+    view._raf = null;
+    const sent = [];
+    view.comm = { send: (m) => sent.push(m) };
+    let rows = [];
+    for (let i = 0; i < 200; i++) {
+      rows = [...document.querySelectorAll('[data-xy-slot="legend_item"]')];
+      if (rows.length >= 3) break;
+      await sleep(25);
+    }
+    if (rows.length < 3) throw new Error(`expected 3 legend rows, got ${rows.length}`);
+    const byName = (name) => rows.find((row) => row.textContent === name);
+
+    // Hide the whole alpha series, then hide category A on the categorical
+    // trace. `_legendOffTraces`/`_legendOffCats` are view-held; the per-trace
+    // `_legendHidden`/`_visMap` live on the GPU records.
+    byName("alpha").dispatchEvent(new MouseEvent("click"));
+    byName("A").dispatchEvent(new MouseEvent("click"));
+    await sleep(50);
+
+    const catBefore = view.gpuTraces[1];
+    const alphaHiddenBefore = !!view.gpuTraces[0]._legendHidden;
+    const catNBefore = catBefore.n;
+    const catVisMapBefore = !!catBefore._visMap;
+    const legendOffTraces = new Set(view._legendOffTraces);
+    const legendOffCats = new Map(view._legendOffCats);
+
+    // Animated streaming append: this routes through the early-return branch
+    // that delegates the whole rebuild to `updatePayload`. `updatePayload`
+    // rebuilds every GPU record from the unfiltered spec, so the transient
+    // legend-toggle fields are dropped unless `_reapplyLegendVisibility` runs.
+    const append = window.__fcAppend;
+    view._applyAppend(
+      { spec: append.spec, affected: append.affected },
+      append.buffers.map(b64)
+    );
+    view._drawNow();
+    view._raf = null;
+    view._renderPick();
+
+    const alphaAfter = view.gpuTraces[0];
+    const catAfter = view.gpuTraces[1];
+    const alphaHiddenAfter = !!alphaAfter._legendHidden;
+    const catNAfter = catAfter.n;
+    const catVisMapAfter = !!catAfter._visMap;
+    const alphaPickCount = alphaAfter.pickCount;
+    // `_legendOffTraces`/`_legendOffCats` survive the rebuild by construction.
+    const offTracesSurvived = new Set(view._legendOffTraces).size === legendOffTraces.size
+      && [...legendOffTraces].every((t) => view._legendOffTraces.has(t));
+    const offCatsSurvived = view._legendOffCats.get(1)
+      && legendOffCats.get(1)
+      && [...legendOffCats.get(1)].every((c) => view._legendOffCats.get(1).has(c));
+
+    document.body.setAttribute(
+      "data-xy-animated-append",
+      JSON.stringify({
+        alphaHiddenBefore, catNBefore, catVisMapBefore,
+        alphaHiddenAfter, catNAfter, catVisMapAfter, alphaPickCount,
+        offTracesSurvived, offCatsSurvived,
+        togglesShipped: sent.filter((m) => m.type === "legend_toggle").length,
+      })
+    );
+  } catch (err) {
+    document.body.setAttribute(
+      "data-xy-animated-append-error",
+      String((err && err.stack) || err)
+    );
+  }
+})();
+</script>
+"""
+
+
+def test_browser_animated_append_preserves_legend_toggle() -> None:
+    """The animated branch of `_applyAppend` delegates the whole rebuild to
+    `updatePayload`, which rebuilds every GPU trace from the unfiltered spec.
+    The transient legend-toggle fields (`_legendHidden`, `_visMap`) live on
+    the GPU records, so the rebuild drops them; `_reapplyLegendVisibility`
+    must re-apply them before the early return (mirroring the non-animated
+    branch and the context-restore rebuild). Without that call, a hidden
+    series/category reappears on the very next streamed tick while its legend
+    row still reads toggled off — and the hidden trace answers pick."""
+    chromium = find_chromium()
+    if not chromium:
+        pytest.skip("no chromium available for the animated append probe")
+
+    codes = np.array(["A", "A", "A", "A", "A", "B", "B", "B"])
+    chart = xy.scatter_chart(
+        # Own x/y arrays (not shared with the categorical trace's data dict)
+        # so the kernel accepts a streaming append to the alpha trace.
+        xy.scatter(np.arange(8.0), np.arange(8.0), name="alpha"),
+        xy.scatter("x", "y", data={"x": np.arange(8.0), "y": np.arange(8.0)}, color=codes),
+        xy.animation(enabled=True, duration=400),
+        xy.legend(),
+        width=520,
+        height=340,
+    )
+
+    fig = chart.figure()
+    fig.build_payload()
+    msg, bufs = append_data(fig, 0, np.array([9.0]), np.array([9.0]))
+    assert msg["type"] == "append" and msg["affected"] == [0]
+    assert "animation" in msg["spec"], "the chart-level animation must reach the wire"
+
+    append_js = json.dumps(
+        {
+            "spec": msg["spec"],
+            "affected": msg["affected"],
+            "buffers": [base64.b64encode(bytes(b)).decode() for b in bufs],
+        }
+    )
+
+    document = probe_document(
+        chart,
+        _ANIMATED_APPEND_PROBE,
+        head=f"<script>window.__fcAppend = {append_js};</script>",
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        page = Path(td) / "animated_append.html"
+        payload = run_browser_probe(
+            chromium,
+            document,
+            page,
+            "data-xy-animated-append",
+            label="animated append preserves legend toggle",
+        )
+
+    # Pre-append: the legend clicks took effect on the GPU records.
+    assert payload["alphaHiddenBefore"] is True, payload
+    assert payload["catNBefore"] == 3 and payload["catVisMapBefore"] is True, payload
+    assert payload["togglesShipped"] == 2, payload
+    # The view-held toggle state survives the rebuild by construction.
+    assert payload["offTracesSurvived"] is True, payload
+    assert payload["offCatsSurvived"] is True, payload
+    # The contract under test: the rebuilt records re-applied the toggle.
+    assert payload["alphaHiddenAfter"] is True, payload
+    assert payload["catNAfter"] == 3 and payload["catVisMapAfter"] is True, payload
+    assert payload["alphaPickCount"] == 0, payload
+
+
+_DENSITY_APPEND_FILTER_DIRTY_PROBE = """
+<script>
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  try {
+    const view = window.__fcProbeView;
+    if (!view) throw new Error("no probe view captured");
+    view._drawNow();
+    view._raf = null;
+    const sent = [];
+    view.comm = { send: (m) => sent.push(m) };
+    let rows = [];
+    for (let i = 0; i < 200; i++) {
+      rows = [...document.querySelectorAll('[data-xy-slot="legend_item"]')];
+      if (rows.length >= 3) break;
+      await sleep(25);
+    }
+    if (rows.length < 3) throw new Error(`expected 3 legend rows, got ${rows.length}`);
+    const byName = (name) => rows.find((row) => row.textContent === name);
+    const g = view.gpuTraces[0];
+
+    byName("B").dispatchEvent(new MouseEvent("click"));
+    await sleep(50);
+    const maskReq = sent.find((m) => m.type === "density_view");
+    const dirtyAfterToggle = !!g._filterDirty;
+
+    // The animated branch's rebuild is triggered even by a no-op append
+    // (same spec + same buffer): `updatePayload` rebuilds every GPU record
+    // unconditionally, dropping the transient `_filterDirty` flag unless
+    // `_reapplyLegendVisibility` re-sets it for the density tier.
+    view._applyAppend(
+      { spec: view.spec, affected: [g.trace.id] },
+      [view._payload]
+    );
+    view._drawNow();
+    view._raf = null;
+
+    const gAfter = view.gpuTraces[0];
+    const dirtyAfterAppend = !!gAfter._filterDirty;
+    // With `_filterDirty` set on the rebuilt density record, request planning
+    // must keep forcing the full-window masked re-bin instead of eliding it
+    // (the unfiltered aggregate would otherwise stand at the home view).
+    const plan = view._densityRequestPlan(gAfter, view.view);
+    const planForcesFullWindow = !!(plan && plan.step === false);
+
+    document.body.setAttribute(
+      "data-xy-density-append-dirty",
+      JSON.stringify({ maskReqSent: !!maskReq, dirtyAfterToggle, dirtyAfterAppend,
+                       planForcesFullWindow })
+    );
+  } catch (err) {
+    document.body.setAttribute(
+      "data-xy-density-append-dirty-error",
+      String((err && err.stack) || err)
+    );
+  }
+})();
+</script>
+"""
+
+
+def test_browser_animated_append_preserves_density_filter_dirty() -> None:
+    """Density traces carry `_filterDirty` so a category toggle's masked re-bin
+    is not elided by the filter-blind `lodAggregateStands` memo. The animated
+    append rebuilds the density record from the unfiltered spec, dropping that
+    flag; `_reapplyLegendVisibility` must re-set it for the density tier, or
+    the unfiltered aggregate stands at the home view indefinitely while the
+    legend row reads hidden — exactly the class of regression the non-animated
+    append path and the context-restore rebuild already protect against."""
+    chromium = find_chromium()
+    if not chromium:
+        pytest.skip("no chromium available for the density append filter-dirty probe")
+
+    chart, cat = _density_category_chart_with_animation()
+
+    document = probe_document(chart, _DENSITY_APPEND_FILTER_DIRTY_PROBE)
+
+    with tempfile.TemporaryDirectory() as td:
+        page = Path(td) / "density_append_dirty.html"
+        payload = run_browser_probe(
+            chromium,
+            document,
+            page,
+            "data-xy-density-append-dirty",
+            label="density append keeps filter dirty",
+        )
+
+    # The legend click shipped the masked re-bin and armed the flag on the
+    # original density record.
+    assert payload["maskReqSent"] is True, payload
+    assert payload["dirtyAfterToggle"] is True, payload
+    # The contract under test: the rebuilt density record still carries the
+    # flag and so request planning still forces the full-window masked re-bin.
+    assert payload["dirtyAfterAppend"] is True, payload
+    assert payload["planForcesFullWindow"] is True, payload
 
 
 # --- the visible-row cache is bounded, and it is reported (§27) --------------
