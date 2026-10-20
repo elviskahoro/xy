@@ -15,7 +15,7 @@ import xy
 from reflex_xy.data_vars import AsyncDataVar, DataVar, validate_columns
 from reflex_xy.handles import DataHandle
 from reflex_xy.plan import build_plan
-from reflex_xy.tokens import build_plan_token, builder_of, parse_token
+from reflex_xy.tokens import build_data_token, build_plan_token, builder_of, parse_token
 
 from .conftest import make_router_data
 
@@ -304,3 +304,94 @@ def test_column_entries_sweep_like_figures(_fresh_registry, client_token):
     dropped = _fresh_registry.sweep(now=entry.last_access + 10**9)
     assert token in dropped
     assert _fresh_registry.get_columns(token) is None
+
+
+def test_release_columns_keeps_binding_and_rebuilds_mounted_dependents(
+    _fresh_registry, client_token
+):
+    """release_columns must honor the "index bounded by *mounted* plans" rule:
+    a dependent composite whose client is still subscribed keeps its plan
+    binding (so the next publish_columns rebuilds and broadcasts to it),
+    while an unmounted dependent is unbound exactly as before."""
+    registry = _fresh_registry
+    data_token = build_data_token(client_token, DataDemo.get_full_name(), "cloud")
+    plan = build_plan("scatter_chart", (xy.scatter("x", "y"),), {})
+    digest = plan.digest
+    composite = build_plan_token(digest, data_token)
+    other_digest = "cd" * 10  # valid hex, no plan registered (unmounted path)
+    other_composite = build_plan_token(other_digest, data_token)
+
+    initial_columns = {"x": [1.0, 2.0], "y": [3.0, 4.0]}
+    registry.publish_columns(data_token, initial_columns)
+    # mount: subscriber-only for `composite`; entry-only (no subscriber) for
+    # `other_composite` — the latter is the case the existing test covers.
+    registry.publish(composite, plan.bind(initial_columns).figure(), broadcast=False)
+    registry.bind_plan(data_token, digest)
+    registry.subscribe(composite, "sid-mounted", rebuildable=True)
+    registry.publish(other_composite, xy.scatter_chart(xy.scatter([1.0], [1.0])).figure())
+    registry.bind_plan(data_token, other_digest)
+    assert registry._digests_by_data_token.get(data_token) == {digest, other_digest}
+
+    # "no data right now": release_columns runs while `sid-mounted` is still
+    # subscribed (coalesced deltas / never unmounted client-side).
+    registry.release_columns(data_token)
+
+    # Mounted composite: entry released (a later re-mount rebuilds from current
+    # state), version tombstone retained, but the plan binding is PRESERVED so
+    # the next publish_columns can find and serve it.
+    assert registry.get(composite) is None
+    assert registry._evicted_versions.get(composite) is not None
+    assert registry._digests_by_data_token.get(data_token) == {digest}
+
+    # Unmounted composite: entry released and binding dropped (no tombstone
+    # because there was never a subscriber).
+    assert registry.get(other_composite) is None
+    assert registry._evicted_versions.get(other_composite) is None
+
+    # The data var recomputes with fresh columns: the still-mounted composite
+    # is rebuilt and bumped (its tombstone version is exceeded), and the
+    # unmounted composite is NOT (its binding was dropped, so publish_columns
+    # iterates only the mounted digest).
+    fresh_columns = {"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]}
+    registry.publish_columns(data_token, fresh_columns)
+    rebuilt = registry.get(composite)
+    assert rebuilt is not None
+    assert rebuilt.figure.traces[0].n_points == 3
+    assert rebuilt.version > registry._evicted_versions.get(composite, 0)
+    assert registry.get(other_composite) is None
+
+
+def test_release_columns_resyncs_only_mounted_dependents(_fresh_registry, client_token):
+    """A still-mounted dependent gets a room-wide err/resync frame (mirroring
+    `_rebuild_dependent`'s failure path); an unmounted one gets nothing —
+    there is no room to strand."""
+    registry = _fresh_registry
+    data_token = build_data_token(client_token, DataDemo.get_full_name(), "cloud")
+    plan = build_plan("scatter_chart", (xy.scatter("x", "y"),), {})
+    digest = plan.digest
+    composite = build_plan_token(digest, data_token)
+    other_digest = "cd" * 10
+    other_composite = build_plan_token(other_digest, data_token)
+
+    errors: list[tuple[str, str, bool]] = []
+
+    async def on_error(token: str, error: str, resync: bool) -> None:
+        errors.append((token, error, resync))
+
+    async def main() -> None:
+        registry.attach_loop(asyncio.get_running_loop())
+        registry.on_error(on_error)
+        registry.publish_columns(data_token, {"x": [1.0], "y": [2.0]})
+        registry.bind_plan(data_token, digest)
+        registry.subscribe(composite, "sid-mounted", rebuildable=True)
+        registry.publish(composite, plan.bind({"x": [1.0], "y": [2.0]}).figure())
+        registry.bind_plan(data_token, other_digest)
+        registry.publish(other_composite, xy.scatter_chart(xy.scatter([1.0], [1.0])).figure())
+
+        registry.release_columns(data_token)
+        await asyncio.sleep(0)  # let the scheduled err task run
+
+    asyncio.run(main())
+
+    assert errors == [(composite, "data released", True)]
+    # the unmounted composite produced no err frame

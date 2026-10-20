@@ -606,14 +606,42 @@ class FigureRegistry:
         empty handle unmounts subscribed charts client-side, and dropping
         the dependent figure caches here keeps a later re-mount rebuilding
         from current state instead of serving pre-release columns.
+
+        Honor the same mounted-ness rule every other mount-ending transition
+        enforces: ``release``/sweep/``unsubscribe``/failed-rebuild cleanup all
+        funnel through ``_unbind_plan_if_unmounted_locked``, which keeps the
+        ``data_token -> digest`` binding for a plan that is still mounted.
+        Iterating the digests instead of wholesale-popping the index makes
+        ``release()`` apply that rule per composite — so a chart whose client
+        is still mounted (a live ``_rebuildable_subscribers`` entry, e.g.
+        coalesced deltas that carried only the final token and never unmounted
+        client-side) keeps its binding, and the next ``publish_columns``
+        rebuilds and broadcasts to it instead of silently stranding it on
+        stale pixels. Resync any such client to mirror the fail-loud
+        ``_schedule_error(..., resync=True)`` seam ``_rebuild_dependent`` uses
+        when a republish fails on a mounted room: the client re-subscribes into
+        the current (empty) state now, instead of waiting for a later
+        republish — or staying stranded if the data stays None.
         """
         from .tokens import build_plan_token
 
         with self._mutex:
             self._column_entries.pop(token, None)
-            digests = self._digests_by_data_token.pop(token, set())
-        for digest in sorted(digests):
-            self.release(build_plan_token(digest, token))
+            digests = sorted(self._digests_by_data_token.get(token, set()))
+        for digest in digests:
+            composite = build_plan_token(digest, token)
+            self.release(composite)
+            with self._mutex:
+                mounted = bool(self._rebuildable_subscribers.get(composite))
+            if mounted:
+                # The client missed the empty-handle unmount. ``release``
+                # already funneled through ``_unbind_plan_if_unmounted_locked``,
+                # which left the plan binding in place because the composite
+                # is still mounted, so the next ``publish_columns`` will
+                # rebuild + broadcast to the room. Ask the client to resync
+                # now too, so the chart reflects the current (empty) state
+                # without waiting — or freezing if the data stays None.
+                self._schedule_error(composite, "data released", resync=True)
 
     def bind_plan(self, data_token: str, digest: str) -> None:
         """Record that a mounted plan binds this data token (idempotent)."""
