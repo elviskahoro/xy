@@ -390,6 +390,30 @@ def test_standalone_tooltips_retain_encoded_color_and_size_channels() -> None:
     assert "g._cpu.size = column(g.trace.size.buf);" in entries
 
 
+def test_standalone_hydration_preserves_direct_rgba_cpu_view() -> None:
+    """Static HTML export must not destroy the build-retained `g._cpu.rgba`
+    view for `color: {mode: "direct_rgba"}` scatters, and must re-attach the
+    color column under the mode-correct key (mirroring the kernel append
+    path in 54_kernel.ts). Regression for the standalone-authored-marker
+    fallback-color bug.
+    """
+    entries = (ROOT / "js/src/60_entries.ts").read_text(encoding="utf-8")
+    # The build-retained CPU record must be merged into, not replaced.
+    assert "if (!g._cpu) g._cpu = {};" in entries, (
+        "standalone hydration wholesale-replaces g._cpu, dropping build-retained views"
+    )
+    assert "g._cpu = {\n        x:" not in entries and "g._cpu={x:" not in entries.replace(
+        " ", ""
+    ), "standalone hydration still constructs a fresh g._cpu object literal"
+    # direct_rgba must file the RGBA column under `rgba`, not `color`.
+    assert 'g.trace.color.mode === "direct_rgba"' in entries, (
+        "standalone hydration has no direct_rgba branch"
+    )
+    assert "g._cpu.rgba = column(g.trace.color.buf);" in entries, (
+        "standalone hydration does not set g._cpu.rgba for direct_rgba"
+    )
+
+
 def test_client_tooltip_value_formatter_preserves_strings() -> None:
     for path, text in FORMATTER_FILES:
         assert 'if (typeof v === "string") return v;' in text, (
