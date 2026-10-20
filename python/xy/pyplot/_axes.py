@@ -7126,9 +7126,15 @@ class Axes(PlotTypeMixin):
                         else resolve_color(rcParams["grid.color"])
                     )
                     axis_style.update(style)
-                    axis_style["grid_color"] = (
-                        axis_style.get("grid_color", fallback) if states[item] else "transparent"
-                    )
+                    if not states[item]:
+                        axis_style["grid_color"] = "transparent"
+                    else:
+                        if (
+                            axis_style.get("grid_color") == "transparent"
+                            and "grid_color" not in style
+                        ):
+                            axis_style.pop("grid_color", None)
+                        axis_style.setdefault("grid_color", fallback)
                 else:
                     axis_style.setdefault("grid_color", "transparent")
         host._invalidate()
