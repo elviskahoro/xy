@@ -29,6 +29,70 @@ import numpy as np
 
 from .. import _textblock
 
+# The figure-level shared colorbar lives in a band this tall, holding a bare
+# 16-px gradient strip (no ticks or label) painted at 15–85% of canvas width —
+# mirroring ``stitch_png``'s grid branch so PNG/SVG/HTML agree on the geometry.
+_SHARED_COLORBAR_BAND = 52
+_SHARED_COLORBAR_STRIP = 16
+_SHARED_COLORBAR_PAD = 12
+
+
+def _colorbar_svg(options: dict[str, Any], canvas_width: float, strip_top: float) -> str:
+    """Render the shared colorbar as a bare gradient strip in an SVG document.
+
+    Mirrors ``stitch_png``'s grid-branch colorbar painting, which writes a
+    16-px tall gradient from 15% to 85% of the canvas width inside a 52-px
+    band reserved below the panel area. Named with a ``data-xy-shared-colorbar``
+    attribute so consumers can locate the strip without parsing ids.
+    """
+    from xy._svg import _colormap_key, _colormap_stops
+
+    cmap = options.get("colormap", "viridis")
+    gradient_id = f"xy-shared-colorbar-{_colormap_key(cmap)}"
+    stops = _colormap_stops(cmap)
+    stop_nodes = "".join(
+        f'<stop offset="{100 * index / max(1, len(stops) - 1):.2f}%" '
+        f'stop-color="rgb({r},{g},{b})"/>'
+        for index, (r, g, b) in enumerate(stops)
+    )
+    x0 = round(canvas_width * 0.15)
+    x1 = round(canvas_width * 0.85)
+    width = max(0.0, x1 - x0)
+    return (
+        f'<defs><linearGradient id="{gradient_id}" x1="0" y1="0" x2="100%" y2="0">'
+        f"{stop_nodes}</linearGradient></defs>"
+        f'<rect data-xy-shared-colorbar="true" x="{x0:g}" y="{strip_top:g}" '
+        f'width="{width:g}" height="{_SHARED_COLORBAR_STRIP:g}" '
+        f'fill="url(#{gradient_id})"/>'
+    )
+
+
+def _colorbar_html(options: dict[str, Any], canvas_width: int, strip_top: int) -> str:
+    """Render the shared colorbar as a positioned gradient div in an HTML document.
+
+    Mirrors ``stitch_png``'s grid-branch colorbar painting, which writes a
+    16-px tall gradient from 15% to 85% of the canvas width inside a 52-px
+    band reserved below the panel area.
+    """
+    from xy._svg import _colormap_stops
+
+    stops = _colormap_stops(options.get("colormap", "viridis"))
+    stops_css = ", ".join(
+        f"rgb({r},{g},{b}) {100 * index / max(1, len(stops) - 1):.2f}%"
+        for index, (r, g, b) in enumerate(stops)
+    )
+    gradient = f"linear-gradient(to right, {stops_css})"
+    x0 = round(canvas_width * 0.15)
+    x1 = round(canvas_width * 0.85)
+    width = max(0, x1 - x0)
+    return (
+        "<div class='xy-shared-colorbar' data-xy-shared-colorbar "
+        "style='position:absolute;"
+        f"left:{x0}px;top:{strip_top}px;"
+        f"width:{width}px;height:{_SHARED_COLORBAR_STRIP}px;"
+        f"background:{gradient};'></div>"
+    )
+
 
 def _svg_text_lines(text: object, x: float, line_step: float) -> str:
     lines = []
@@ -257,6 +321,7 @@ def compose_html(
     nrows: int,
     ncols: int,
     suptitle: Optional[str],
+    colorbar: Optional[dict[str, Any]] = None,
     suptitle_style: Optional[dict[str, Any]] = None,
     *,
     figure_labels: Optional[list[dict[str, Any]]] = None,
@@ -275,6 +340,7 @@ def compose_html(
     from xy import export
 
     absolute = positions is not None and canvas_size is not None
+    colorbar_h = _SHARED_COLORBAR_BAND if colorbar else 0
     panels = []
     payloads = []
     for index, chart in enumerate(charts):
@@ -322,16 +388,54 @@ def compose_html(
         )
     else:
         title_html = f"<h2 class='xy-suptitle' style='{title_css}'>{_html.escape(suptitle)}</h2>"
+    colorbar_html = ""
+    if colorbar:
+        if absolute:
+            colorbar_html = _colorbar_html(
+                colorbar,
+                int(canvas_size[0]),
+                int(canvas_size[1]) + _SHARED_COLORBAR_PAD,
+            )
+        else:
+            # CSS-grid mode: the grid sizes itself to its max-content cells, so
+            # paint the strip as the lone row spanning every column at the
+            # bottom of the grid.  An explicit 16-px height + 12-px margin-top
+            # reproduces `stitch_png`'s 52-px band geometry.
+            from xy._svg import _colormap_stops
+
+            stops = _colormap_stops(colorbar.get("colormap", "viridis"))
+            stops_css = ", ".join(
+                f"rgb({r},{g},{b}) {100 * index / max(1, len(stops) - 1):.2f}%"
+                for index, (r, g, b) in enumerate(stops)
+            )
+            colorbar_html = (
+                "<div class='xy-shared-colorbar' data-xy-shared-colorbar "
+                "style='grid-column:1/-1;margin-top:12px;"
+                "height:16px;background:linear-gradient(to right, "
+                f"{stops_css});'></div>"
+            )
     if absolute:
         grid_css = (
             f".xy-grid {{ position: relative; width: {canvas_size[0]}px; "
-            f"height: {canvas_size[1]}px; overflow: hidden; }}"
+            f"height: {canvas_size[1] + colorbar_h}px; overflow: hidden; }}"
         )
-        decorations = (
+        panel_area_decorations = (
             title_html
             + _html_figure_labels(figure_labels or [])
             + _html_figure_legend(figure_legend)
         )
+        if colorbar and panel_area_decorations:
+            # Wrap title/labels/legend in a positioned div sized to the
+            # original panel area (canvas_size[1]) so their figure-fraction
+            # `top:` percentages anchor to the panel area, not the
+            # colorbar-grown grid.  The shared colorbar lives in its own band
+            # below this wrapper.
+            panel_area_decorations = (
+                "<div style='position:absolute;left:0;top:0;"
+                f"width:{canvas_size[0]}px;height:{canvas_size[1]}px'>"
+                f"{panel_area_decorations}</div>"
+            )
+        decorations = panel_area_decorations + colorbar_html
         grid = "\n".join(panels) + ("\n" + decorations if decorations else "")
         title_html = ""
     else:
@@ -339,7 +443,7 @@ def compose_html(
             f".xy-grid {{ display: grid; grid-template-columns: repeat({ncols}, max-content); "
             "gap: 4px; padding: 4px; overflow-x: auto; }}"
         )
-        grid = "\n".join(panels)
+        grid = "\n".join(panels) + ("\n" + colorbar_html if colorbar_html else "")
     client_js = export._javascript_for_inline_script(export._bundled_js("standalone"))
     return f"""<!doctype html>
 <html>
@@ -356,6 +460,7 @@ def compose_html(
   .xy-figure-legend-row {{ display: flex; align-items: center; gap: 7px; white-space: nowrap; }}
   .xy-figure-legend-title {{ font-weight: 600; }}
   .xy-figure-legend-swatch {{ box-sizing: border-box; display: inline-block; width: 18px; height: 3px; }}
+  .xy-shared-colorbar {{ z-index: 4; pointer-events: none; }}
 </style>
 </head>
 <body>
@@ -381,6 +486,7 @@ def compose_svg(
     nrows: int,
     ncols: int,
     suptitle: Optional[str],
+    colorbar: Optional[dict[str, Any]] = None,
     suptitle_style: Optional[dict[str, Any]] = None,
     *,
     figure_labels: Optional[list[dict[str, Any]]] = None,
@@ -399,6 +505,7 @@ def compose_svg(
     figures = [chart.figure() for chart in charts]
     if not figures:
         raise ValueError("figure has no axes to save")
+    colorbar_h = _SHARED_COLORBAR_BAND if colorbar else 0
     if positions is not None and canvas_size is not None:
         title_h = 0
         offsets = [
@@ -408,7 +515,10 @@ def compose_svg(
             )
             for position in positions
         ]
-        total_size: tuple[int, int] = (int(canvas_size[0]), int(canvas_size[1]))
+        total_size: tuple[int, int] = (
+            int(canvas_size[0]),
+            int(canvas_size[1]) + colorbar_h,
+        )
     else:
         col_widths = [
             max(int(figures[index].width) for index in range(col, len(figures), ncols))
@@ -428,7 +538,7 @@ def compose_svg(
         for index in range(len(figures)):
             row, col = divmod(index, ncols)
             offsets.append((sum(col_widths[:col]), title_h + sum(row_heights[:row])))
-        total_size = (sum(col_widths), title_h + sum(row_heights))
+        total_size = (sum(col_widths), title_h + sum(row_heights) + colorbar_h)
     body: list[str] = []
     for index, figure in enumerate(figures):
         svg = _svg.to_svg(figure, id_prefix=f"xy-panel-{index}-")
@@ -438,19 +548,28 @@ def compose_svg(
             f'width="{int(figure.width)}" height="{int(figure.height)}" '
             f'viewBox="0 0 {int(figure.width)} {int(figure.height)}">{inner}</svg>'
         )
+    colorbar_svg = ""
+    if colorbar:
+        strip_top = (total_size[1] - colorbar_h) + _SHARED_COLORBAR_PAD
+        colorbar_svg = _colorbar_svg(colorbar, float(total_size[0]), float(strip_top))
     style = suptitle_style or {}
     anchor = {"left": "start", "center": "middle", "right": "end"}.get(
         str(style.get("ha", "center")), "middle"
     )
     width, height = total_size
+    # Figure-fraction decorations anchor to the panel area (excluding the
+    # shared-colorbar band) like matplotlib's figure coordinates: the band is
+    # appended below the panel area so its pixels must not pull the suptitle,
+    # suplabels, or legend further toward the bottom of the grown canvas.
+    decorations_h = height - colorbar_h
     size = float(style.get("size", 16))
     block = _textblock.measure(suptitle, size) if suptitle else None
     # y is a figure fraction measured from the bottom, like matplotlib. Grid
     # composition reserves ``title_h``; absolute composition overlays the full
     # canvas and therefore uses that as the available title band.
     baseline = _suptitle_baseline(
-        height,
-        float(title_h or height),
+        decorations_h,
+        float(title_h or decorations_h),
         style,
         block,
         size,
@@ -464,7 +583,7 @@ def compose_svg(
         )
     else:
         title = ""
-    labels = _svg_figure_labels(figure_labels or [], width, height)
+    labels = _svg_figure_labels(figure_labels or [], width, decorations_h)
     legend = ""
     if figure_legend and figure_legend.get("items"):
         loc = (
@@ -475,13 +594,14 @@ def compose_svg(
         options = {**figure_legend, "loc": loc}
         legend = _svg._legend(
             list(figure_legend["items"]),
-            {"x": 0.0, "y": 0.0, "w": float(width), "h": float(height)},
+            {"x": 0.0, "y": 0.0, "w": float(width), "h": float(decorations_h)},
             options,
             "xy-figure-legend",
         )
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
-        f'viewBox="0 0 {width} {height}">{title}{"".join(body)}{labels}{legend}</svg>'
+        f'viewBox="0 0 {width} {height}">'
+        f"{title}{colorbar_svg}{''.join(body)}{labels}{legend}</svg>"
     )
 
 
@@ -569,6 +689,30 @@ def stitch_png(
             figure_legend,
             scale=scale,
         )
+        if colorbar:
+            # Extend the canvas by the shared-colorbar band and paint the
+            # strip below the absolutely placed panels, mirroring the grid
+            # branch's bare 16-px gradient.  Suptitle and figure decorations
+            # have already rendered against the original canvas height, so
+            # growing afterward preserves their figure-fraction positions.
+            background = np.asarray(_raster._parse_color(facecolor), dtype=np.uint8)
+            grown = np.empty(
+                (canvas.shape[0] + _SHARED_COLORBAR_BAND, canvas.shape[1], 4),
+                dtype=np.uint8,
+            )
+            grown[: canvas.shape[0]] = canvas
+            grown[canvas.shape[0] :] = background
+            canvas = grown
+            from xy._svg import _lut
+
+            x0, x1 = int(canvas.shape[1] * 0.15), int(canvas.shape[1] * 0.85)
+            y0 = canvas.shape[0] - _SHARED_COLORBAR_BAND + _SHARED_COLORBAR_PAD
+            gradient = _lut(
+                colorbar.get("colormap", "viridis"),
+                np.linspace(0.0, 1.0, max(2, x1 - x0)),
+            )
+            canvas[y0 : y0 + _SHARED_COLORBAR_STRIP, x0:x1, :3] = gradient[None, :, :]
+            canvas[y0 : y0 + _SHARED_COLORBAR_STRIP, x0:x1, 3] = 255
         return _png.encode(canvas)
 
     col_widths = [
@@ -584,7 +728,7 @@ def stitch_png(
     ]
     suptitle_size = float((suptitle_style or {}).get("size", 14))
     title_h = round(_textblock.measure(suptitle, suptitle_size).height + 16) if suptitle else 0
-    colorbar_h = 52 if colorbar else 0
+    colorbar_h = _SHARED_COLORBAR_BAND if colorbar else 0
     background = np.asarray(_raster._parse_color(facecolor), dtype=np.uint8)
     canvas = np.empty((title_h + sum(row_heights) + colorbar_h, sum(col_widths), 4), dtype=np.uint8)
     canvas[...] = background
@@ -605,10 +749,10 @@ def stitch_png(
         from xy._svg import _lut
 
         x0, x1 = int(canvas.shape[1] * 0.15), int(canvas.shape[1] * 0.85)
-        y0 = title_h + sum(row_heights) + 12
+        y0 = title_h + sum(row_heights) + _SHARED_COLORBAR_PAD
         gradient = _lut(colorbar.get("colormap", "viridis"), np.linspace(0.0, 1.0, max(2, x1 - x0)))
-        canvas[y0 : y0 + 16, x0:x1, :3] = gradient[None, :, :]
-        canvas[y0 : y0 + 16, x0:x1, 3] = 255
+        canvas[y0 : y0 + _SHARED_COLORBAR_STRIP, x0:x1, :3] = gradient[None, :, :]
+        canvas[y0 : y0 + _SHARED_COLORBAR_STRIP, x0:x1, 3] = 255
     _blend_raster_figure_decorations(
         canvas,
         figure_labels or [],
