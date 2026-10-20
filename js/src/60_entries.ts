@@ -76,14 +76,26 @@ export function renderStandalone(el, spec, arrayBuffer) {
       // first paint and leaves hover without a usable ChartView.
       if (g._cpuRibbon) continue;
       if (!Number.isInteger(g.trace.x) || !Number.isInteger(g.trace.y)) continue;
-      g._cpu = {
-        x: column(g.trace.x),
-        y: column(g.trace.y),
-        xMeta: g.xMeta,
-        yMeta: g.yMeta,
-      };
+      // The build may already have retained CPU state for this trace (e.g.
+      // `g._cpu.rgba` for `direct_rgba` scatters, mirrored by the kernel-side
+      // append fast path). Merge the standalone-only wire fields into the
+      // existing record rather than replacing it, so build-retained views
+      // survive for hover and the Canvas2D authored-marker overlay.
+      if (!g._cpu) g._cpu = {};
+      g._cpu.x = column(g.trace.x);
+      g._cpu.y = column(g.trace.y);
+      g._cpu.xMeta = g.xMeta;
+      g._cpu.yMeta = g.yMeta;
       if (g.trace.color && Number.isInteger(g.trace.color.buf)) {
-        g._cpu.color = column(g.trace.color.buf);
+        // Match the kernel append path's shape: `rgba` for `direct_rgba`,
+        // `color` for every other mode. Filing the 4-component u8 RGBA
+        // column under `color` would corrupt the authored-marker overlay
+        // (which reads `g._cpu.rgba`) and the tooltip color source.
+        if (g.trace.color.mode === "direct_rgba") {
+          g._cpu.rgba = column(g.trace.color.buf);
+        } else {
+          g._cpu.color = column(g.trace.color.buf);
+        }
       }
       if (g.trace.size && Number.isInteger(g.trace.size.buf)) {
         g._cpu.size = column(g.trace.size.buf);
