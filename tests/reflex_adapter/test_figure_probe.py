@@ -14,7 +14,7 @@ import reflex as rx
 
 import reflex_xy
 import xy
-from reflex_xy.app import FigureProbeError, probe_figure_builders
+from reflex_xy.app import FigureProbeError, _ProbeLoopError, probe_figure_builders
 
 #: Armed per-test; every probed builder below is a no-op otherwise.
 _ARM = {
@@ -23,6 +23,7 @@ _ARM = {
     "bad_return": False,
     "session": False,
     "async_ran": False,
+    "async_bad": False,
 }
 
 
@@ -73,6 +74,13 @@ class ProbeDemo(rx.State):
         _ARM["async_ran"] = True
         await asyncio.sleep(0)
         return None
+
+    @reflex_xy.figure(probe="build")
+    async def async_opted_in_bad(self):
+        if not _ARM["async_bad"]:
+            return None
+        await asyncio.sleep(0)
+        raise ValueError("async builder failed against default state")
 
 
 @pytest.fixture(autouse=True)
@@ -147,3 +155,81 @@ def test_probe_levels_are_identity_strict(level):
             @reflex_xy.figure(probe=level)
             def chart(self):
                 return None
+
+
+def test_async_opted_in_runs_from_inside_a_running_event_loop():
+    """The uvicorn case: `post_compile` fires from inside the server's already-
+    running loop (uvicorn's `Config.load()` runs the ASGI factory inside
+    `Server._serve()`'s coroutine). Pre-fix, the probe called
+    `asyncio.run(builder(...))` there, which raised
+    `RuntimeError: asyncio.run() cannot be called from a running event loop`
+    and aborted backend startup for an explicitly-opted-in builder that
+    succeeds against default state. The probe now drives the builder on a
+    fresh, private loop instead, so the foreign loop is untouched and the
+    builder runs to completion.
+
+    This is the exact reproduction from the bug report's "minimal mechanism
+    repro": calling `probe_figure_builders()` from inside `asyncio.run(main())`.
+    """
+    _ARM["async_ran"] = False
+
+    async def main() -> list[str]:
+        # `asyncio.get_running_loop()` succeeds here, so the buggy
+        # `asyncio.run(builder(...))` would have raised inside this body.
+        return probe_figure_builders(ProbeDemo)
+
+    probed = asyncio.run(main())
+    assert any(name.endswith("async_opted_in") for name in probed), probed
+    assert _ARM["async_ran"], "the opted-in async builder never executed"
+
+
+def test_async_opted_in_failure_from_inside_running_loop_still_surfaces():
+    """A genuinely-failing opted-in async builder must still surface as a
+    `FigureProbeError` with the builder-failure advice (`probe=False`) — the
+    loop-aware path must not swallow real builder errors or reclassify them as
+    probe-infrastructure failures."""
+    _ARM["async_bad"] = True
+
+    async def main() -> list[str]:
+        return probe_figure_builders(ProbeDemo)
+
+    with pytest.raises(FigureProbeError, match="async_opted_in_bad") as excinfo:
+        asyncio.run(main())
+    msg = str(excinfo.value)
+    # Builder-failure path: the message advises disabling the probe, which is
+    # correct for a genuine builder defect.
+    assert "probe=False" in msg, msg
+    assert isinstance(excinfo.value.__cause__, ValueError)
+
+
+def test_loop_creation_failure_is_not_builder_failure_advice(monkeypatch):
+    """Defensive path: when a foreign loop is running and the probe's
+    worker-loop *creation* itself fails (e.g. interpreter shutdown, or a
+    runtime that restricts loop creation), the surfaced
+    ``FigureProbeError`` must NOT advise ``probe=False`` — the builder is
+    fine, the probe infrastructure could not run here. The message must
+    distinguish that from a builder failure.
+
+    The worker thread calls ``asyncio.new_event_loop``; making that raise
+    reproduces the genuine infra path (distinct from a builder that raises
+    ``RuntimeError`` from its own body, which must surface as a builder
+    failure with the ``probe=False`` advice — see
+    :func:`test_async_opted_in_failure_from_inside_running_loop_still_surfaces`).
+    """
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("loop policy disabled in this runtime")
+
+    monkeypatch.setattr(asyncio, "new_event_loop", _boom)
+
+    async def main() -> list[str]:
+        return probe_figure_builders(ProbeDemo)
+
+    with pytest.raises(FigureProbeError, match="async_opted_in") as excinfo:
+        asyncio.run(main())
+    msg = str(excinfo.value)
+    # Infrastructure-distinct message: never the builder-failure advice that
+    # would tell the user to disable the probe they explicitly opted into.
+    assert "probe=False" not in msg, msg
+    assert "could not run" in msg, msg
+    assert isinstance(excinfo.value.__cause__, _ProbeLoopError)
