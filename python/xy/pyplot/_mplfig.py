@@ -1971,6 +1971,7 @@ class Figure:
             and self._supxlabel_entry is None
             and self._supylabel_entry is None
             and self._figure_legend is None
+            and self._shared_colorbar is None
         ):
             return charts[0]
         return None
@@ -2076,6 +2077,7 @@ class Figure:
                         self._nrows,
                         self._ncols,
                         self._suptitle,
+                        self._shared_colorbar,
                         self._resolved_suptitle_style(),
                         figure_labels=self._resolved_figure_labels(),
                         figure_legend=self._figure_legend,
@@ -2166,6 +2168,7 @@ class Figure:
                     self._nrows,
                     self._ncols,
                     self._suptitle,
+                    self._shared_colorbar,
                     self._resolved_suptitle_style(),
                     figure_labels=self._resolved_figure_labels(),
                     figure_legend=self._figure_legend,
@@ -2189,6 +2192,7 @@ class Figure:
             and self._axes[0]._figure_rect is None
             and not self._subplot_adjust
             and self._suptitle is None
+            and self._shared_colorbar is None
         ):
             # Matplotlib's inline backend displays figures with
             # bbox_inches="tight" and pad_inches=.1.  For the ordinary default
@@ -2266,6 +2270,8 @@ class Figure:
             if self._suptitle:
                 size = float(self._resolved_suptitle_style()["size"])
                 content_h += round(size * 1.4) + 8  # h2 line box + top margin
+            if self._shared_colorbar is not None:
+                content_h += 52  # mirror stitch_png's colorbar band
             return doc, content_w, content_h
         return doc, width, height
 
