@@ -1092,6 +1092,14 @@ class _Converter:
         if tspans:
             if el.text and el.text.strip():
                 _unsupported("<text> mixing direct text and <tspan>")
+            # A <tspan> inherits its <text> parent's x/y when it omits either
+            # (SVG positioning semantics). The generator emits absolute
+            # per-line coordinates, but inheriting — instead of defaulting a
+            # missing coordinate to 0.0 — keeps the subset correct for any
+            # future tspan that elides one, so a partial tspan does not
+            # collapse every line onto the page origin.
+            parent_x = _float(el.get("x"), 0.0, "x")
+            parent_y = _float(el.get("y"), 0.0, "y")
             for ts in tspans:
                 if _local(ts.tag) != "tspan":
                     _unsupported(f"<text> child <{_local(ts.tag)}>")
@@ -1100,8 +1108,8 @@ class _Converter:
                     _unsupported("nested <tspan>")
                 runs.append(
                     (
-                        _float(ts.get("x"), 0.0, "tspan x"),
-                        _float(ts.get("y"), 0.0, "tspan y"),
+                        _float(ts.get("x"), parent_x, "tspan x"),
+                        _float(ts.get("y"), parent_y, "tspan y"),
                         ts.text or "",
                     )
                 )

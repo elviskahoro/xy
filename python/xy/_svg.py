@@ -2120,8 +2120,16 @@ def _text_cell(font_size: float) -> tuple[float, float]:
     )
 
 
-def _text_block_content(text: object, x: float, line_step: float) -> str:
-    """SVG text children for the shared newline-delimited block geometry."""
+def _text_block_content(text: object, x: float, y: float, line_step: float) -> str:
+    """SVG text children for the shared newline-delimited block geometry.
+
+    Each wrapped line is one ``<tspan>`` positioned by an absolute per-line
+    ``y`` (the parent ``<text>`` baseline offset by ``index * line_step``)
+    rather than a relative ``dy``. The PDF exporter's ``<tspan>`` whitelist
+    accepts only ``x``/``y`` — not ``dy`` — and the annotation path already
+    uses this absolute form, so chrome text stays on the one multi-line
+    representation ``_pdf._render_text`` consumes.
+    """
     split = _textblock.split_lines(text)
     if len(split) == 1:
         # Keep ordinary text as a direct text node.  Besides producing the
@@ -2130,8 +2138,9 @@ def _text_block_content(text: object, x: float, line_step: float) -> str:
         return escape(split[0])
     lines = []
     for index, line in enumerate(split):
-        dy = f' dy="{_num(line_step)}"' if index else ""
-        lines.append(f'<tspan x="{_num(x)}"{dy}>{escape(line)}</tspan>')
+        lines.append(
+            f'<tspan x="{_num(x)}" y="{_num(y + index * line_step)}">{escape(line)}</tspan>'
+        )
     return "".join(lines)
 
 
@@ -4039,7 +4048,7 @@ def render_svg(spec: dict[str, Any], blob: bytes, *, id_prefix: str = "") -> str
                     f'<text x="{_num(x)}" y="{_num(y)}" fill="{color}" '
                     f'font-size="{_num(font_size)}" text-anchor="{anchor}"'
                     f"{slot_attrs}{transform}>"
-                    f"{_text_block_content(item['text'], x, block.line_step)}</text>"
+                    f"{_text_block_content(item['text'], x, y, block.line_step)}</text>"
                 )
 
     if polar is not None:
@@ -4207,7 +4216,9 @@ def render_svg(spec: dict[str, Any], blob: bytes, *, id_prefix: str = "") -> str
         legacy_y = plot["y"] - plot["top_axis_room"] - (10 if compact else 12) - legacy_trailing
         legacy_x = width / 2
         legacy_text = "\n".join(legacy_block.lines)
-        legacy_content = _text_block_content(legacy_text, legacy_x, legacy_block.line_step)
+        legacy_content = _text_block_content(
+            legacy_text, legacy_x, legacy_y, legacy_block.line_step
+        )
         chrome.append(
             f'<text x="{_num(legacy_x)}" '
             f'y="{_num(legacy_y)}" '
@@ -4241,7 +4252,7 @@ def render_svg(spec: dict[str, Any], blob: bytes, *, id_prefix: str = "") -> str
         # `title_block.lines` is the wrapped set — drawing `entry["text"]` here
         # would put the whole title on one line inside a band reserved for two.
         title_content = _text_block_content(
-            "\n".join(title_block.lines), title_x, title_block.line_step
+            "\n".join(title_block.lines), title_x, title_y, title_block.line_step
         )
         chrome.append(
             f'<text x="{_num(title_x)}" '
@@ -4281,7 +4292,7 @@ def render_svg(spec: dict[str, Any], blob: bytes, *, id_prefix: str = "") -> str
             f'font-size="{_num(font_size)}"'
             f"{font_attrs} "
             f'fill="{escape(paint)}"{transform}>'
-            f"{_text_block_content(axis['label'], x, block.line_step)}</text>"
+            f"{_text_block_content(axis['label'], x, y, block.line_step)}</text>"
         )
 
     append_axis_title(xa, is_x=True)
