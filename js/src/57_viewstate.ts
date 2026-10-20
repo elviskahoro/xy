@@ -389,6 +389,25 @@ Object.assign(ChartView.prototype, {
       if (e.pointerType === "mouse" && e.button !== 0) return;
       if (!this._interactionFlag("navigation", true)) return;
       this._cancelViewAnimation();
+      // A second pointer landing on the same band mid-gesture would otherwise
+      // overwrite `drag` and orphan the in-flight one: its `end` then returns
+      // early on the pointerId mismatch, leaving `selRect` overlaid and the
+      // pan's `pan_drag` phase:"end" commit unemitted (interaction.md §5 —
+      // every capture-owning gesture terminates deterministically). Settle the
+      // prior gesture first by replaying its `end` with a synthetic
+      // `pointercancel`: release capture, hide any span rect, and — because a
+      // pan keeps its last in-frame view however it ends — still commit the
+      // pan's end-phase view_change. A span's coordinate-dependent zoom rolls
+      // back, matching the pointercancel policy for gestures that need a
+      // release coordinate they never received.
+      if (drag) {
+        end({
+          type: "pointercancel",
+          pointerId: drag.pointerId,
+          clientX: drag.sx,
+          clientY: drag.sy,
+        });
+      }
       drag = {
         pointerId: e.pointerId,
         sx: e.clientX,
