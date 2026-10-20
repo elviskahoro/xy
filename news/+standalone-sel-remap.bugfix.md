@@ -1,0 +1,1 @@
+Fix standalone (kernel-less) chart box/lasso selection highlighting and counting the wrong points after a legend category is hidden, by remapping shipped row indices through `_visInv` into the filtered vertex order the GPU draws — mirroring the kernel-connected selection path.
