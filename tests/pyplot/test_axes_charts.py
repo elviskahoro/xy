@@ -268,6 +268,47 @@ def test_eventplot_composes_native_segment_marks() -> None:
     assert [trace.kind for trace in _traces(ax)] == ["errorbar", "errorbar"]
 
 
+def _eventplot_fixed_row(entry: dict) -> np.ndarray:
+    """Constant per-tick y offset Matplotlib would pin (horizontal eventplot)."""
+    return np.asarray(entry["args"][1], dtype=np.float64)
+
+
+@pytest.mark.parametrize(
+    "lineoffsets, expected",
+    [
+        (1, [0.0, 1.0, 2.0]),
+        (5, [0.0, 5.0, 10.0]),
+        ([5], [0.0, 5.0, 10.0]),
+        (0.5, [0.0, 0.5, 1.0]),
+    ],
+)
+def test_eventplot_scalar_lineoffsets_staggers_one_row_per_dataset(lineoffsets, expected) -> None:
+    """A scalar (or length-1) ``lineoffsets`` is Matplotlib's stagger stride."""
+    _fig, ax = plt.subplots()
+    ax.eventplot([[1, 2, 3], [4, 5], [6]], lineoffsets=lineoffsets)
+    rows = [float(np.unique(_eventplot_fixed_row(e))[0]) for e in ax._entries]
+    np.testing.assert_allclose(rows, expected)
+
+
+def test_eventplot_default_lineoffsets_places_each_dataset_on_its_own_row() -> None:
+    """The default ``lineoffsets=1`` no longer overlaps every group onto one row."""
+    _fig, ax = plt.subplots()
+    ax.eventplot([[1, 2, 3], [4, 5], [6]])
+    rows = [float(np.unique(_eventplot_fixed_row(e))[0]) for e in ax._entries]
+    assert len(set(rows)) == 3  # not all the same row
+    np.testing.assert_allclose(rows, [0.0, 1.0, 2.0])
+
+
+def test_eventplot_single_dataset_keeps_scalar_offset_unstaggered() -> None:
+    """A single dataset is not staggered; its row keeps the scalar offset."""
+    _fig, ax = plt.subplots()
+    ax.eventplot([[1, 2, 3]])
+    np.testing.assert_allclose(np.unique(_eventplot_fixed_row(ax._entries[0])), [1.0])
+    _fig, ax = plt.subplots()
+    ax.eventplot([[1, 2, 3]], lineoffsets=2)
+    np.testing.assert_allclose(np.unique(_eventplot_fixed_row(ax._entries[0])), [2.0])
+
+
 @pytest.mark.parametrize("baseline", ["zero", "sym", "wiggle", "weighted_wiggle"])
 def test_stackplot_uses_native_stacked_bounds(baseline) -> None:
     _fig, ax = plt.subplots()
