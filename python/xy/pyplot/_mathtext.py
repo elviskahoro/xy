@@ -234,11 +234,24 @@ def _convert_math_styled(body: str) -> tuple[str, list[bool]] | None:
     out = _SCRIPT.sub(script, out)
     for name in _WRAPPERS:
         marker = _STYLE_UPRIGHT if name in _UPRIGHT_WRAPPERS else _STYLE_ITALIC
-        out = re.sub(
-            r"\\" + name + r"\{([^{}]*)\}",
-            lambda match, marker=marker: marker + match.group(1) + _STYLE_POP,
-            out,
-        )
+        # ``\text{...}`` is text mode: matplotlib retains interior spaces there
+        # (unlike ``\mathrm``/``\textrm`` font groups, where math-mode spacing
+        # rules still drop them).  Protect those spaces with the ``\x01``
+        # sentinel that the glyph loop below already maps to a visible space.
+        if name == "text":
+            out = re.sub(
+                r"\\" + name + r"\{([^{}]*)\}",
+                lambda match, marker=marker: (
+                    marker + match.group(1).replace(" ", "\x01") + _STYLE_POP
+                ),
+                out,
+            )
+        else:
+            out = re.sub(
+                r"\\" + name + r"\{([^{}]*)\}",
+                lambda match, marker=marker: marker + match.group(1) + _STYLE_POP,
+                out,
+            )
     out = out.replace("\\left", "").replace("\\right", "")
 
     def command(match: re.Match[str]) -> str:

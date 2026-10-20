@@ -217,6 +217,28 @@ def test_mathtext_preserves_uppercase_subscript_and_local_fallbacks() -> None:
     assert "\\" not in converted
 
 
+def test_mathtext_text_wrapper_retains_interior_spaces() -> None:
+    # matplotlib's ``\text{...}`` is text mode and "otherwise retaining
+    # spaces" (PR #22173, matplotlib 3.8).  The other wrappers are math font
+    # groups where math-mode spacing rules still drop unescaped spaces.
+    assert mathtext_to_unicode(r"$\text{Water level}$") == "Water level"
+    assert mathtext_to_unicode(r"$\text{Water level (m)}$") == "Water level (m)"
+    assert mathtext_to_unicode(r"$\text{Flow rate}$") == "Flow rate"
+    # leading/trailing/repeated spaces inside \text are preserved verbatim
+    assert mathtext_to_unicode(r"$\text{  a  b  }$") == "  a  b  "
+    assert mathtext_to_unicode(r"$\text{}$") == ""
+    # mixed text + math: the text span keeps its space, bare math does not
+    assert mathtext_to_unicode(r"$\text{Water level}(m)$") == "Water level(m)"
+    # \text next to an explicit \, spacing command keeps both spaces
+    assert mathtext_to_unicode(r"$x\,\text{ units}$") == "x  units"
+    # math font groups still drop spaces, matching matplotlib
+    assert mathtext_to_unicode(r"$\mathrm{max depth}$") == "maxdepth"
+    assert mathtext_to_unicode(r"$\textrm{Flow rate}$") == "Flowrate"
+    assert mathtext_to_unicode(r"$\mathit{a b}$") == "ab"
+    assert mathtext_to_unicode(r"$\mathbf{a b}$") == "ab"
+    assert mathtext_to_unicode(r"$\operatorname{arg max}$") == "argmax"
+
+
 def test_mathtext_reaches_labels_ticks_and_legend() -> None:
     fig, ax = plt.subplots()
     x = np.linspace(0, 2 * np.pi, 30)
@@ -244,6 +266,17 @@ def test_legend_mathtext_never_exposes_raw_backslash_commands() -> None:
     assert "N f_X(x)+1/(1+e^(−t))+unsupportedq" in svg  # noqa: RUF001
     assert "\\unsupported" not in svg
     assert "\\frac" not in svg
+
+
+def test_mathtext_text_wrapper_spaces_reach_svg_labels_and_legend() -> None:
+    fig, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1], label=r"$\text{Flow rate}$")
+    ax.set_ylabel(r"$\text{Water level}$")
+    svg = _svg(fig)
+    assert "Water level" in svg  # not "Waterlevel"
+    assert "Waterlevel" not in svg
+    assert "Flow rate" in svg  # legend entry keeps its space
+    assert "Flowrate" not in svg
 
 
 def test_funcformatter_mathtext_tick_labels_render_unicode() -> None:
