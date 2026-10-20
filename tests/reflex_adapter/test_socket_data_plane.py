@@ -1889,3 +1889,194 @@ def test_bare_data_token_is_not_a_figure(_fresh_registry):
             await client.disconnect()
 
     run(main())
+
+
+# -- the cold-subscribe / column-republish race (bind_plan ordering) ----------
+
+
+def test_republish_during_cold_sub_attempt_fans_out_to_this_plan(_fresh_registry, monkeypatch):
+    """The cold-subscribe race: a column republish landing between the
+    rebuild attempt's ``publish_if_missing`` and the subscribe path's
+    ``bind_plan`` used to snapshot an empty digest set and silently never
+    rebuild this plan, leaving the subscriber stuck on the v1 generation
+    while the registry's columns already advanced. The plan index must be
+    bound atomically with the entry's insertion (inside the rebuild attempt),
+    so any ``publish_columns`` that observes the entry also observes its
+    digest and fans out — exactly what the inline comment in on_sub used to
+    only claim.
+    """
+    registry = _fresh_registry
+    plan = plane_plan()
+    data_token = plane_data_token()
+    composite = build_plan_token(plan.digest, data_token)
+
+    v1_columns = {"x": np.linspace(0.0, 1.0, 24), "y": np.linspace(0.0, 1.0, 24) * 2.0}
+    v2_columns = {"x": np.linspace(0.0, 1.0, 5), "y": np.linspace(0.0, 1.0, 5) * 2.0}
+    # Prime the column cache so the cold sub's rebuild reads the v1 generation
+    # synchronously — the canonical cached-columns race window. The plan must
+    # be registered (plane_plan()) so the rebuild hook AND the racing
+    # _rebuild_dependent can both bind v2 columns back into a figure.
+    registry.publish_columns(data_token, v1_columns)
+
+    async def rebuild(token_str):
+        # The hook reads the v1 columns synchronously and builds a v1 figure
+        # — the snapshot that would go stale without the race fix.
+        columns = registry.get_columns(data_token).columns
+        return xy.scatter_chart(xy.scatter(columns["x"], columns["y"])).figure()
+
+    namespace = XYNamespace(registry, rebuild=rebuild)
+    namespace._set_server(
+        SimpleNamespace(manager=SimpleNamespace(is_connected=lambda sid, _ns: True))
+    )
+
+    async def get_session(sid):
+        return {"client_token": CLIENT_TOKEN}
+
+    sent = []
+    republished = threading.Event()
+    plan_bound_at_insert: list[bool] = []
+
+    async def racing_broadcast(token, entry):
+        # This is the rebuild attempt's broadcast_payload call. With the fix,
+        # publish_if_missing has ALREADY bound the digest atomically with the
+        # entry's insertion. The racing publish_columns landing here therefore
+        # sees the bound digest and rebuilds the composite from v2. Without
+        # the fix the digest set was empty at this moment and the republish
+        # silently dropped — the bug.
+        if not republished.is_set():
+            republished.set()
+            # Atomicity contract: at the moment publish_columns runs, the
+            # entry is observable. The digest must be observable too.
+            assert registry.get(composite) is entry
+            assert registry._digests_by_data_token.get(data_token) == {plan.digest}
+            plan_bound_at_insert.append(True)
+            registry.publish_columns(data_token, v2_columns)
+        # Swallow the rebuild-attempt's own broadcast: nobody has joined the
+        # room yet (enter_room runs in on_sub AFTER the attempt completes),
+        # so the room-side fan-out would be a no-op anyway. The direct reply
+        # below is what reaches the subscriber.
+        return None
+
+    async def enter_room(sid, room):
+        return None
+
+    async def send_payload(sid, token, entry, **kwargs):
+        sent.append((sid, token, entry, kwargs))
+
+    monkeypatch.setattr(namespace, "get_session", get_session)
+    monkeypatch.setattr(namespace, "broadcast_payload", racing_broadcast)
+    monkeypatch.setattr(namespace, "enter_room", enter_room)
+    monkeypatch.setattr(namespace, "_send_payload", send_payload)
+
+    async def main():
+        await namespace.on_sub("sid-1", {"fig": composite, "mid": "m1", "px": 321})
+        await asyncio.sleep(0)
+
+        # The republish landed exactly once, between the rebuild's
+        # publish_if_missing and on_sub's bind_plan.
+        assert republished.is_set()
+        # And the digest was already bound at publish_if_missing time — the
+        # race fix's atomicity contract.
+        assert plan_bound_at_insert == [True]
+
+        # The racing republish fanned out into the bound plan: the composite
+        # entry is now the v2 rebuild, not the v1 snapshot.
+        current = registry.get(composite)
+        assert current is not None
+        assert current.figure.traces[0].n_points == 5
+        assert registry.get_columns(data_token).version == 2
+
+        # The direct reply to the subscriber carries the (raced) current v2
+        # generation — NOT the stale v1 figure the rebuild's snapshot built.
+        # Without the fix this assertion fails: sent carries v1 (24 pts).
+        assert len(sent) == 1
+        sid, stoken, sentry, kwargs = sent[0]
+        assert (sid, stoken) == ("sid-1", composite)
+        assert sentry is current
+        assert sentry.figure.traces[0].n_points == 5
+        assert kwargs == {"px": 321, "mid": "m1"}
+
+    run(main())
+
+
+def test_cold_sub_attempt_binds_plan_before_broadcast_e2e(_fresh_registry):
+    """End-to-end over the real socket transport: a client subscribing to a
+    cold composite plan must receive a payload built from the CURRENT column
+    generation when a column republish races the subscribe. Asserts the race
+    fix holds through the real socket.io transport, the real rebuild hook,
+    and the real room/direct-reply ordering — not just at the registry layer.
+    """
+    plan = plane_plan()
+    data_token = plane_data_token()
+    composite = build_plan_token(plan.digest, data_token)
+
+    v1_columns = {"x": np.linspace(0.0, 1.0, 24), "y": np.linspace(0.0, 1.0, 24) * 2.0}
+    v2_columns = {"x": np.linspace(0.0, 1.0, 5), "y": np.linspace(0.0, 1.0, 5) * 2.0}
+    # Prime v1 columns so the rebuild's figure comes from v1 synchronously.
+    registry.publish_columns(data_token, v1_columns)
+
+    republished = threading.Event()
+    received: list[dict] = []
+
+    async def paced_rebuild(token_str):
+        # Read v1 columns and build a v1 figure — the snapshot that would go
+        # stale without the race fix.
+        columns = registry.get_columns(data_token).columns
+        return xy.scatter_chart(xy.scatter(columns["x"], columns["y"])).figure()
+
+    async def main():
+        async with data_plane_server(rebuild=paced_rebuild) as (url, namespace):
+            # Inject the racing republish at the precise window the bug report
+            # calls out: AFTER publish_if_missing has inserted the entry and
+            # (with the fix) bound the digest atomically, BEFORE on_sub's
+            # bind_plan. The rebuild attempt's broadcast_payload is the only
+            # await point in that window on the cached-columns path, so wrap
+            # it to fire the republish exactly once between insert and bind.
+            real_broadcast = namespace.broadcast_payload
+
+            async def racing_broadcast(token, entry):
+                if token == composite and not republished.is_set():
+                    republished.set()
+                    # The entry is inserted; with the fix the digest is bound
+                    # too, so this publish_columns fans out via
+                    # _rebuild_dependent into a v2 figure for this plan.
+                    registry.publish_columns(data_token, v2_columns)
+                await real_broadcast(token, entry)
+
+            namespace.broadcast_payload = racing_broadcast
+
+            client = await connect_client(url)
+            collector = Collector(client)
+            await client.emit("sub", {"fig": composite, "mid": "m1"}, namespace="/_xy")
+            payload = await collector.next(collector.payloads)
+            # Drain any follow-up room broadcast triggered by the racing
+            # republish's _rebuild_dependent (it may overtake the direct
+            # reply if it lands after enter_room; both carry the same v2).
+            for _ in range(2):
+                try:
+                    extra = await collector.next(collector.payloads, timeout=0.2)
+                except TimeoutError:
+                    break
+                payload = extra if extra["version"] > payload["version"] else payload
+            received.append(payload)
+            await client.disconnect()
+
+    run(main())
+
+    # The republish landed during the in-flight cold subscribe.
+    assert republished.is_set()
+    # The column registry now holds v2.
+    assert registry.get_columns(data_token).version == 2
+    # The current composite figure was rebuilt from v2 (5 pts). Without
+    # the fix it would still be the v1 snapshot (24 pts).
+    current = registry.get(composite)
+    assert current is not None
+    assert current.figure.traces[0].n_points == 5
+    # The client's authoritative payload must also be v2 (5 pts): the
+    # subscribe's direct reply (and any racing room broadcast) carries
+    # the current generation. Without the fix, the subscriber's epoch
+    # is built from v1 (24 pts) and nothing repairs it until a later
+    # republish.
+    payload = received[0]
+    assert payload["fig"] == composite
+    assert payload["spec"]["traces"][0]["n_points"] == 5

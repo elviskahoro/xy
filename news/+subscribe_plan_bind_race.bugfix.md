@@ -1,0 +1,1 @@
+Bind a data-bound chart's plan digest atomically with its cold-subscribe rebuild entry insertion, so a column republish racing the subscribe always fans out to the chart instead of silently serving stale pixels until the next data change.

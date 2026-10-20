@@ -145,6 +145,20 @@ def _token_identity(token: str) -> _TokenIdentity:
     return _TokenIdentity(affinity_client=None, rebuildable=False)
 
 
+def _plan_bound_of(token: str) -> Optional[tuple[str, str]]:
+    """The ``(data_token, digest)`` for a composite plan token, else None.
+
+    Used to bind a composite plan's digest into the registry index atomically
+    with its rebuild-attempt insertion (see ``publish_if_missing``), closing
+    the cold-subscribe race where a column republish landing before the
+    subscribe path's ``bind_plan`` would otherwise never fan out to it.
+    """
+    composite = parse_plan_token(token)
+    if composite is None:
+        return None
+    return (composite.data_token, composite.digest)
+
+
 def _plain(value: Any) -> Any:
     """Best-effort JSON-safe copy for small reply metadata.
 
@@ -249,9 +263,18 @@ class XYNamespace(AsyncNamespace):
                 identity = _token_identity(token)
                 self.registry.subscribe(token, sid, rebuildable=identity.rebuildable)
                 if identity.plan_bound is not None:
-                    # Index the mounted plan before serving, so a column
-                    # republish racing this subscribe rebuilds it (the
-                    # re-read below then serves that fresher generation).
+                    # Defensive idempotent bind: the rebuild attempt already
+                    # indexed composite plan tokens atomically with the
+                    # entry's insertion (``publish_if_missing``), so any
+                    # ``publish_columns`` that observes the entry also
+                    # observes its digest and fans out to it — the race this
+                    # comment used to only claim is now closed there. This
+                    # call covers the rare path where the attempt returned a
+                    # pre-existing entry it neither inserted nor bound (e.g.
+                    # the rebuild's figure was None and a sibling
+                    # publish_columns raced in to publish the composite);
+                    # otherwise it is a harmless set-add on an already-bound
+                    # digest.
                     self.registry.bind_plan(*identity.plan_bound)
                 # A normal state publish can replace a just-rebuilt entry
                 # while its room-wide broadcast is still completing, before
@@ -536,7 +559,9 @@ class XYNamespace(AsyncNamespace):
                     return None, unknown
                 return entry, None
 
-            entry, inserted = self.registry.publish_if_missing(token, figure, guard=guard)
+            entry, inserted = self.registry.publish_if_missing(
+                token, figure, guard=guard, plan_bound=_plan_bound_of(token)
+            )
             if entry is None:
                 return None, unknown
             if not inserted:
