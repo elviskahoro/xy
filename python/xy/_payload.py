@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 
-from . import _native, channels, interaction, kernels, lod
+from . import channels, interaction, kernels, lod
 from ._trace import Trace
 from .columns import Column
 from .config import (
@@ -582,10 +582,16 @@ class PayloadMixin(_Host):
 
     def _m4_decimate(
         self, t: Trace, xr: tuple, px_width: int, *arrays: np.ndarray
-    ) -> tuple[str, tuple[np.ndarray, ...]]:
+    ) -> tuple[str, tuple[np.ndarray, ...], Optional[np.ndarray]]:
         """M4-decimate the parallel `arrays` (x first) when the trace is over
         the threshold; M4 already excludes non-finite within the window (§19).
-        Returns `(tier, arrays)` — shared by the line and area emitters.
+        Returns ``(tier, arrays, index)`` — `index` is the M4 row selection
+        (canonical rows) for the decimated tier, or None for the direct tier.
+        The line/area emitters compose it into ``Trace.shipped_sel`` so the
+        client's shipped-vertex pick/selection translates back to canonical
+        (§17) — without it a hover on shipped vertex *i* reads canonical row
+        *i*, an arbitrary wrong row for any line/area over the threshold.
+        Shared by the line and area emitters.
 
         On a nonlinear x axis the buckets are laid out in scale coordinates so
         each bucket covers a uniform strip of *screen*, not of raw data (§28);
@@ -597,32 +603,41 @@ class PayloadMixin(_Host):
             # a multi-turn series is not monotonic at all, so the buckets carry
             # no screen meaning. Ship direct until polar-aware decimation
             # exists (spec/design/polar-axes.md §7).
-            return "direct", arrays
+            return "direct", arrays, None
         if t.n_points <= DECIMATION_THRESHOLD:
-            return "direct", arrays
+            return "direct", arrays, None
         eps = float(np.finfo(np.float64).eps)
         mx, (m0, m1) = self._binning_coords(t.x_axis, arrays[0], xr)
         if mx is not arrays[0]:
             idx = kernels.m4_indices(mx, arrays[1], m0, m1 + eps, px_width)
-            return "decimated", tuple(a[idx] for a in arrays)
-        if len(arrays) == 2:
-            selected = _native.m4_points(arrays[0], arrays[1], xr[0], xr[1] + eps, px_width)
-            return "decimated", selected
+            return "decimated", tuple(a[idx] for a in arrays), idx
+        # Gather through the M4 index in Python rather than the fused
+        # `m4_points` native entry: the line/area emitters need the index
+        # itself to record `Trace.shipped_sel` (pick/selection translation),
+        # and the gather runs over the ~4-per-pixel-column decimated output,
+        # not the source column. `m4_points` is byte-identical to this path
+        # (tests/test_kernels.py::test_native_m4_points_matches_index_gather).
         idx = kernels.m4_indices(arrays[0], arrays[1], xr[0], xr[1] + eps, px_width)
         if len(idx):
-            return "decimated", tuple(a[idx] for a in arrays)
-        return "decimated", tuple(a[:0] for a in arrays)
+            return "decimated", tuple(a[idx] for a in arrays), idx
+        return "decimated", tuple(a[:0] for a in arrays), idx
 
     def _emit_line(
         self, t: Trace, pw: "_PayloadWriter", xr: tuple, yr: tuple, px_width: int
     ) -> dict[str, Any]:
-        tier, (xv, yv) = self._m4_decimate(t, xr, px_width, t.x.values, t.y.values)
-        sel = None
-        if tier == "direct":
+        tier, (xv, yv), m4 = self._m4_decimate(t, xr, px_width, t.x.values, t.y.values)
+        if tier == "decimated":
+            # Shipped vertex i is the canonical row m4[i]; the log/finite mask
+            # below composes into this as m4[mask], keeping the mapping aligned
+            # with the (possibly further narrowed) shipped buffer.
+            sel: Optional[np.ndarray] = m4
+            prefiltered = False
+        else:
             sel = self._finite_sel(t, xv, yv)
             if sel is not None:
                 xv, yv = xv[sel], yv[sel]
-        if len(xv) and self._visible_mask_needed(t, prefiltered=sel is not None):
+            prefiltered = sel is not None
+        if len(xv) and self._visible_mask_needed(t, prefiltered=prefiltered):
             finite = self._log_visible_mask(t, xv, yv)
             if not bool(np.all(finite)):
                 sel = np.flatnonzero(finite) if sel is None else sel[finite]
@@ -636,6 +651,7 @@ class PayloadMixin(_Host):
         # Attach direct keys in the same finite/log-filtered row order.
         if t.transition_keys is not None:
             self._transition_entry(entry, t, pw, sel)
+        t.shipped_sel = sel  # pick/selection translation (§17) — lines too
         return entry
 
     def _emit_area(
@@ -643,20 +659,25 @@ class PayloadMixin(_Host):
     ) -> dict[str, Any]:
         if t.base is None:
             raise ValueError("area trace missing baseline column")
-        tier, (xv, yv, bv) = self._m4_decimate(
+        tier, (xv, yv, bv), m4 = self._m4_decimate(
             t, xr, px_width, t.x.values, t.y.values, t.base.values
         )
-        sel = None
+        if tier == "decimated":
+            sel: Optional[np.ndarray] = m4
+        else:
+            sel = None
         if self._visible_mask_needed(t, prefiltered=False, base_column=t.base):
-            sel = np.flatnonzero(self._log_visible_mask(t, xv, yv, bv))
-            if len(sel) != len(xv):
-                xv, yv, bv = xv[sel], yv[sel], bv[sel]
+            finite = self._log_visible_mask(t, xv, yv, bv)
+            if not bool(np.all(finite)):
+                sel = np.flatnonzero(finite) if sel is None else sel[finite]
+                xv, yv, bv = xv[finite], yv[finite], bv[finite]
         entry = self._base_entry(t, pw, xv, yv, tier, self._default_styled(t))
         if tier == "decimated":
             entry["decimation_px"] = int(px_width)
         if t.transition_keys is not None:
             self._transition_entry(entry, t, pw, sel)
         entry["base"] = pw.ship(bv, t.base, scale=self._axis_scale(t.y_axis))
+        t.shipped_sel = sel  # pick/selection translation (§17) — areas too
         return entry
 
     def _emit_error_band(

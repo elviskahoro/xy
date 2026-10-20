@@ -224,6 +224,137 @@ def test_long_line_ships_decimated():
     assert np.isclose(ye.astype(np.float64).max() + ym["offset"], 99.0, atol=1e-3)
 
 
+# --------------------------------------------------------------------------
+# Line/area hover pick: shipped vertex index → canonical row translation.
+# `_emit_line`/`_emit_area` record `Trace.shipped_sel` (the M4 selection,
+# composed with the finite/log masks) so `pick()` translates the client's
+# shipped-vertex hover index back to canonical — without it, a decimated
+# line resolves shipped vertex i to canonical row i (an arbitrary wrong
+# row), and indices in [n_marks, n_points) pass the canonical bounds check
+# and read arbitrary rows (staff-review regression, introduced in 34d3df2).
+# --------------------------------------------------------------------------
+
+
+def test_pick_translates_decimated_line_shipped_index():
+    # The reported repro: a 50,000-point line y=x at px_width=2048 ships
+    # ~3,866 decimated vertices while n_points stays 50,000.
+    n = 50_000
+    x = np.arange(n, dtype=np.float64)
+    y = np.arange(n, dtype=np.float64)
+    fig = Figure().line(x, y)
+    spec, _ = fig.build_payload(px_width=2048)
+    t = fig.traces[0]
+    tr = spec["traces"][0]
+    assert tr["tier"] == "decimated"
+    assert t.shipped_sel is not None
+    assert len(t.shipped_sel) == tr["n_marks"] < t.n_points
+
+    # Hovering shipped vertex 850 resolves to the canonical row that vertex
+    # represents, not canonical row 850.
+    expected = int(t.shipped_sel[850])
+    assert expected == 10999  # the documented repro value
+    row = fig.pick(0, 850)
+    assert row is not None
+    assert row["index"] == expected
+    assert row["x"] == 10999.0 and row["y"] == 10999.0
+
+    # Every shipped vertex translates through the recorded mapping.
+    for i in (0, 1, len(t.shipped_sel) - 1):
+        assert fig.pick(0, i)["index"] == int(t.shipped_sel[i])
+
+
+def test_pick_decimated_line_out_of_range_returns_none():
+    n = 50_000
+    x = np.arange(n, dtype=np.float64)
+    y = np.arange(n, dtype=np.float64)
+    fig = Figure().line(x, y)
+    spec, _ = fig.build_payload(px_width=2048)
+    n_marks = spec["traces"][0]["n_marks"]
+    t = fig.traces[0]
+    # Indices past the shipped vertex count must return None — the old code
+    # bounds-checked against t.n_points and read arbitrary canonical rows.
+    assert fig.pick(0, n_marks) is None
+    assert fig.pick(0, n_marks + 1) is None
+    assert fig.pick(0, t.n_points - 1) is None  # far past the shipped buffer
+    assert fig.pick(0, -1) is None
+
+
+def test_pick_translates_decimated_area_shipped_index():
+    n = 50_000
+    x = np.arange(n, dtype=np.float64)
+    y = np.arange(n, dtype=np.float64)
+    fig = Figure().area(x, y, base=np.zeros(n))
+    spec, _ = fig.build_payload(px_width=2048)
+    t = fig.traces[0]
+    tr = spec["traces"][0]
+    assert tr["tier"] == "decimated"
+    assert t.shipped_sel is not None
+    assert len(t.shipped_sel) == tr["n_marks"]
+    expected = int(t.shipped_sel[100])
+    row = fig.pick(0, 100)
+    assert row is not None
+    assert row["index"] == expected
+    assert row["x"] == float(x[expected])
+    assert fig.pick(0, tr["n_marks"]) is None
+
+
+def test_pick_translates_direct_line_nan_drop():
+    # A direct-tier line that drops a NaN row must translate shipped indices
+    # through the finite selection — the line case of the scatter fix
+    # (previously the mapping was dropped for every non-scatter kind).
+    x = np.array([0.0, 1.0, 2.0, 3.0, 4.0])
+    y = np.array([10.0, np.nan, 12.0, 13.0, 14.0])
+    fig = Figure().line(x, y)
+    spec, _ = fig.build_payload()
+    assert spec["traces"][0]["tier"] == "direct"
+    assert list(fig.traces[0].shipped_sel) == [0, 2, 3, 4]
+    row = fig.pick(0, 1)  # shipped index 1 == canonical row 2
+    assert row["index"] == 2
+    assert row["x"] == 2.0 and row["y"] == 12.0
+    row_last = fig.pick(0, 3)  # shipped index 3 == canonical row 4
+    assert row_last["x"] == 4.0 and row_last["y"] == 14.0
+    assert fig.pick(0, 4) is None  # only 4 shipped vertices
+
+
+def test_pick_refuses_unbuilt_decimated_line():
+    # A line over the threshold that reached pick without a built payload
+    # can't be translated (the decimated buffer is a function of px_width);
+    # refuse rather than read an arbitrary canonical row (§16 exact-or-nothing).
+    n = DECIMATION_THRESHOLD + 5_000
+    fig = Figure().line(np.arange(n, dtype=np.float64), np.arange(n, dtype=np.float64))
+    assert fig.traces[0].shipped_sel is None
+    assert fig.pick(0, 5) is None
+
+
+def test_pick_polar_large_line_keeps_identity():
+    # Polar forces the direct tier in `_m4_decimate`, so a large polar line
+    # ships an identity mapping and pick must NOT be refused.
+    n = DECIMATION_THRESHOLD + 5_000
+    x = np.arange(n, dtype=np.float64)
+    y = np.arange(n, dtype=np.float64)
+    fig = Figure(coords="polar").line(x, y)
+    spec, _ = fig.build_payload(px_width=2048)
+    assert spec["traces"][0]["tier"] == "direct"
+    row = fig.pick(0, 100)
+    assert row is not None and row["index"] == 100 and row["x"] == 100.0
+
+
+def test_to_shipped_indices_translates_decimated_line():
+    n = 50_000
+    x = np.arange(n, dtype=np.float64)
+    y = np.arange(n, dtype=np.float64)
+    fig = Figure().line(x, y)
+    fig.build_payload(px_width=2048)
+    t = fig.traces[0]
+    sel = t.shipped_sel
+    # The canonical row that shipped vertex 850 represents maps back to 850.
+    canon = np.array([int(sel[850]), int(sel[1])], dtype=np.uint32)
+    np.testing.assert_array_equal(fig.to_shipped_indices(0, canon), [850, 1])
+    # A canonical row that isn't in the shipped subset maps to nothing.
+    dropped = np.array([int(sel[850]) - 1], dtype=np.uint32)
+    assert fig.to_shipped_indices(0, dropped).size == 0
+
+
 def test_first_payload_decimation_follows_concrete_figure_width() -> None:
     n = 100_000
     x = np.arange(n, dtype=np.float64)
