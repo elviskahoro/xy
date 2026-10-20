@@ -179,8 +179,9 @@ def pick(
     canonical store, never through the f32 GPU path (design dossier §16/§17).
 
     `index` is a *shipped* vertex index (what the client's GPU pick sees);
-    it is translated to a canonical row when the shipped copy dropped NaN
-    rows. Returns None if out of range.
+    it is translated to a canonical row when the shipped copy dropped rows
+    (NaN/log drop on the direct tier, or M4 decimation on line/area).
+    Returns None if out of range.
 
     `drill_seq` is the subset version the client picked against. If the drill
     advanced (or exited) since, the index is in a dead coordinate space —
@@ -203,7 +204,7 @@ def pick(
         if shipped_sel is None:
             return None
     else:
-        shipped_sel = _point_shipped_sel(t)
+        shipped_sel = _point_shipped_sel(fig, t)
     if shipped_sel is not None:
         if idx < 0 or idx >= len(shipped_sel):
             return None
@@ -382,7 +383,7 @@ def to_shipped_indices(fig: "Figure", trace_id: int, canonical: np.ndarray) -> n
     """Translate canonical row indices to *shipped* vertex positions for a
     trace — the coordinate space the client's per-vertex selection mask uses.
     Identity when nothing was dropped at ship time."""
-    sel = _point_shipped_sel(_trace(fig, trace_id))
+    sel = _point_shipped_sel(fig, _trace(fig, trace_id))
     if sel is None:
         return np.asarray(canonical, dtype=np.uint32)
     # `sel` is sorted ascending (flatnonzero/m4 output); membership maps each
@@ -420,23 +421,37 @@ def _expand_zone_chunks(col: Any, chunks: np.ndarray) -> np.ndarray:
     return rows
 
 
-def _point_shipped_sel(t: Any) -> Optional[np.ndarray]:
+def _point_shipped_sel(fig: "Figure", t: Any) -> Optional[np.ndarray]:
     """Shipped point vertices → canonical rows, even before first payload build.
 
-    `build_payload` records this on the Trace for the widget path. Direct public
-    calls to pick()/to_shipped_indices() still deserve the same coordinate-space
-    contract, so derive the direct-scatter mapping lazily when it has not been
-    established yet. Density full-view has no point vertices until drill-in.
+    `build_payload` records this on the Trace for every pickable kind that
+    drops rows at ship time (scatter's NaN/log drop; line/area's M4 decimation
+    and NaN/log/baseline drop). Direct public calls to pick()/
+    to_shipped_indices() still deserve the same coordinate-space contract, so
+    derive the direct-scatter mapping lazily when it has not been established
+    yet. Density full-view has no point vertices until drill-in.
+
+    A line/area over the decimation threshold that reached pick without a built
+    payload can't be translated — the decimated shipped vertex array is a
+    function of px_width and x-range and isn't reconstructable here, and an
+    identity mapping would read an arbitrary canonical row at the shipped
+    index. Refuse (empty selection) instead, preserving §16's exact-or-nothing
+    contract; build_payload always establishes the mapping for traces it
+    ships, so this only fires for a direct pick against an unbuilt trace.
+    Polar forces the direct tier (`_m4_decimate`), so its identity mapping
+    still stands there.
     """
     if t.shipped_sel is not None:
         return t.shipped_sel
-    if t.kind != "scatter":
-        return None
-    if t.use_density() and not t.drill_mode:
+    if t.kind == "scatter":
+        if t.use_density() and not t.drill_mode:
+            return np.empty(0, dtype=np.uint32)
+        if not (t.x.zone.null_count or t.y.zone.null_count):
+            return None
+        return np.flatnonzero(np.isfinite(t.x.values) & np.isfinite(t.y.values)).astype(np.uint32)
+    if t.kind in ("line", "area") and t.n_points > DECIMATION_THRESHOLD and fig.coords != "polar":
         return np.empty(0, dtype=np.uint32)
-    if not (t.x.zone.null_count or t.y.zone.null_count):
-        return None
-    return np.flatnonzero(np.isfinite(t.x.values) & np.isfinite(t.y.values)).astype(np.uint32)
+    return None
 
 
 def decimate_view(
