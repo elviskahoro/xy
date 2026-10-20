@@ -12,6 +12,8 @@ which path served a figure (§28: every tier decision is observable).
 
 from __future__ import annotations
 
+import numpy as np
+
 try:
     from . import _native as _impl
 except ImportError as err:  # pragma: no cover - platform-dependent
@@ -45,6 +47,40 @@ factorize_fixed_u8_counts = _impl.factorize_fixed_u8_counts
 factorize_unicode1_u8_counts = _impl.factorize_unicode1_u8_counts
 transition_keys_fixed = _impl.transition_keys_fixed
 m4_indices = _impl.m4_indices
+
+
+def m4_area_indices(
+    x: "np.ndarray",
+    y: "np.ndarray",
+    base: "np.ndarray",
+    x0: float,
+    x1: float,
+    n_buckets: int,
+) -> "np.ndarray":
+    """M4 indices preserving per-bucket extrema of BOTH edges of an area fill.
+
+    Area/error_band fills draw two independent edges — the upper (``y``) and
+    the lower (``base``). M4 keyed on ``y`` alone drops a bucket's base
+    min/max row unless that row is also a y first/min/max/last, so the
+    renderer interpolates the lower edge straight across the dropped
+    dip/spike and the band shape is silently clipped (the extrema-exact M4
+    guarantee of §5/§28 then holds for the y edge only). The sorted union of
+    the y-keyed and base-keyed per-bucket extrema restores it for both edges.
+
+    NaN/±∞ in either value column are skipped by the kernel's per-bucket state
+    machine, so a non-finite ``base`` never becomes a bucket's base min/max;
+    rows selected via the y edge that carry a non-finite ``base`` are dropped
+    downstream by the area emitter's visible-mask pass.
+    """
+    idx_y = _impl.m4_indices(x, y, x0, x1, n_buckets)
+    idx_b = _impl.m4_indices(x, base, x0, x1, n_buckets)
+    if idx_b.size == 0:
+        return idx_y
+    if idx_y.size == 0:
+        return idx_b
+    return np.union1d(idx_y, idx_b).astype(np.uint32, copy=False)
+
+
 marching_squares = _impl.marching_squares
 marching_triangles = _impl.marching_triangles
 is_sorted = _impl.is_sorted
@@ -119,6 +155,7 @@ __all__ = [
     "indexed_triangles",
     "is_sorted",
     "local_log_density",
+    "m4_area_indices",
     "m4_indices",
     "marching_squares",
     "marching_triangles",
