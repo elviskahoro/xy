@@ -2192,5 +2192,295 @@ def test_child_frames_default_to_governed_path_and_opt_into_shared_host(
     assert opted_in["sameHostInRegistry"] is True, result
     assert opted_in["distinctFromParentHost"] is True, result
     assert opted_in["glHostMarker"] == "shared", result
-    assert opted_in["presents2d"] is True, result
+    assert opted_in["presents2d"] is True
     assert opted_in["nonblank"] is True, result
+
+
+# ---------------------------------------------------------------------------
+# Oversized backing store: a chart whose canvas backing store (CSS size ×
+# devicePixelRatio) exceeds the GPU's MAX_VIEWPORT_DIMS must degrade
+# gracefully — clamp the pass like the native path's driver does — instead of
+# throwing an uncaught RangeError out of the requestAnimationFrame draw
+# callback and leaving a permanently blank chart (commit 18d3bc4 regression).
+# ---------------------------------------------------------------------------
+
+
+def _oversized_chart_html(probe: str) -> str:
+    # A backing store well past SwiftShader's 8192 MAX_VIEWPORT_DIMS limit:
+    # width=8300 with default margins leaves plot.w ≈ 8224 device pixels,
+    # comfortably over the cap on every GPU the CI matrix reports.
+    chart = xy.scatter_chart(
+        xy.scatter(
+            [0.0, 0.5, 1.0],
+            [0.0, 0.5, 1.0],
+            size=10,
+        ),
+        width=8300,
+        height=400,
+        padding=(4, 4, 4, 4),
+    )
+    document = chart.to_html()
+    render_call = next((call for call in RENDER_CALLS if call in document), None)
+    assert render_call is not None, "to_html render call shape changed; update RENDER_CALLS"
+    return document.replace(render_call, probe, 1)
+
+
+_OVERSIZED_VIEWPORT_PROBE = r"""
+  (async () => {
+    const uncaughtErrors = [];
+    window.addEventListener("error", (event) => {
+      uncaughtErrors.push(String(event && event.error && event.error.stack || event && event.message || event));
+    });
+    window.addEventListener("unhandledrejection", (event) => {
+      uncaughtErrors.push(String(event && event.reason));
+    });
+    try {
+      document.body.style.cssText = "margin:0;overflow:hidden";
+      const holder = document.getElementById("chart");
+      holder.replaceChildren();
+      holder.style.cssText = "width:8300px;height:400px;overflow:hidden";
+      const view = xy.renderStandalone(holder, spec, buf);
+      const host = view._glHost;
+      if (!host) throw new Error("oversized probe did not acquire the shared host");
+      const maxViewport = host._maxViewport || [0, 0];
+      const deviceW = view.canvas.width;
+      const deviceH = view.canvas.height;
+      const exceedsViewport = deviceW > maxViewport[0] || deviceH > maxViewport[1];
+
+      const surfaceNonblank = (v) => {
+        const context = v._present2d;
+        if (!context) return null;
+        const pixels = context.getImageData(0, 0, context.canvas.width, context.canvas.height).data;
+        let lit = 0;
+        for (let offset = 0; offset < pixels.length; offset += 4) {
+          if (pixels[offset] || pixels[offset + 1] || pixels[offset + 2] || pixels[offset + 3]) lit += 1;
+        }
+        return lit;
+      };
+
+      // The first draw() is the path that used to throw uncaught out of the
+      // requestAnimationFrame callback. Drive it directly and through the
+      // public draw() entry point the rAF callback uses.
+      view._drawNow();
+      view._raf = null;
+      view.draw();
+      // Let any queued rAF draw callback drain.
+      await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+
+      const litAfterDraw = surfaceNonblank(view);
+      const capacityW = host.canvas.width;
+      const capacityH = host.canvas.height;
+      const capacityClamped = capacityW <= maxViewport[0] && capacityH <= maxViewport[1];
+
+      // A subsequent resize that re-enters _drawNow must not rethrow either.
+      const resizeErrorsBefore = uncaughtErrors.length;
+      view._resize(view.size.w, view.size.h);
+      view._drawNow();
+      view._raf = null;
+      await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+      const resizeErrors = uncaughtErrors.length - resizeErrorsBefore;
+
+      // Context loss/restore while oversized must recover, not brick the chart
+      // with the misleading "WebGL2 context could not be restored." card.
+      const extension = host.gl.getExtension("WEBGL_lose_context");
+      if (!extension) throw new Error("WEBGL_lose_context extension unavailable");
+      const waitUntil = async (predicate, label) => {
+        const deadline = performance.now() + 5000;
+        while (!predicate()) {
+          if (performance.now() >= deadline) throw new Error(`timed out waiting for ${label}`);
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+      };
+      const lossCount = view._contextLossCount;
+      const restoreCount = view._contextRestoreCount;
+      extension.loseContext();
+      await waitUntil(() => view._contextLossCount >= lossCount + 1, "oversized context loss fan-out");
+      extension.restoreContext();
+      await waitUntil(
+        () => view._contextRestoreCount >= restoreCount + 1 && view.canvas.dataset.xyCtx === "live",
+        "oversized context restore fan-out",
+      );
+      view._drawNow();
+      view._raf = null;
+      await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+      const litAfterRestore = surfaceNonblank(view);
+      const recoveryError = view._contextRecoveryError;
+      const rootState = view.root.dataset.xyContextState;
+      const ctxStamp = view.canvas.dataset.xyCtx;
+      const rootTextIsErrorCard = view.root.textContent.includes("could not be restored");
+
+      document.body.setAttribute("data-xy-oversized-probe", JSON.stringify({
+        uncaughtErrors,
+        exceedsViewport,
+        maxViewport,
+        deviceW,
+        deviceH,
+        hostStamp: view.canvas.dataset.xyGlHost,
+        ctxStampBefore: "live",
+        ctxStampAfterDraw: view.canvas.dataset.xyCtx,
+        contextStateAfterDraw: view.root.dataset.xyContextState,
+        litAfterDraw,
+        capacityW,
+        capacityH,
+        capacityClamped,
+        resizeErrors,
+        litAfterRestore,
+        recoveryError: recoveryError ? String(recoveryError && recoveryError.message || recoveryError) : null,
+        rootStateAfterRestore: rootState,
+        ctxStampAfterRestore: ctxStamp,
+        rootTextIsErrorCard,
+      }));
+    } catch (error) {
+      document.body.setAttribute(
+        "data-xy-oversized-probe-error",
+        String((error && error.stack) || error),
+      );
+    }
+  })();
+"""
+
+
+def test_oversized_backing_store_clamps_and_paints(tmp_path: Path) -> None:
+    """A chart whose canvas backing store exceeds MAX_VIEWPORT_DIMS must paint.
+
+    The shared host used to throw a ``RangeError`` from ``_ensureCapacity`` that
+    escaped the ``requestAnimationFrame`` draw callback uncaught, leaving a
+    permanently blank chart that still reported ``ready``/``live``. The host
+    must instead clamp the pass to the GPU's viewport limit the way the native
+    per-chart path's driver does, present the within-viewport portion, and keep
+    the chart live through a context loss/restore cycle.
+    """
+    chromium = find_chromium()
+    if chromium is None:
+        pytest.skip("Chromium unavailable")
+
+    result = run_browser_probe(
+        chromium,
+        _oversized_chart_html(_OVERSIZED_VIEWPORT_PROBE),
+        tmp_path / "shared_glhost_oversized.html",
+        "data-xy-oversized-probe",
+        label="oversized shared-host viewport probe",
+    )
+
+    assert result["uncaughtErrors"] == [], result
+    assert result["exceedsViewport"] is True, (
+        f"test premise not met: device {result['deviceW']}x{result['deviceH']} "
+        f"does not exceed MAX_VIEWPORT_DIMS {result['maxViewport']}"
+    )
+    assert result["hostStamp"] == "shared", result
+    assert result["ctxStampAfterDraw"] == "live", result
+    assert result["contextStateAfterDraw"] == "ready", result
+    assert result["litAfterDraw"] > 0, result
+    assert result["capacityClamped"] is True, (
+        f"host capacity {result['capacityW']}x{result['capacityH']} exceeded "
+        f"MAX_VIEWPORT_DIMS {result['maxViewport']}"
+    )
+    assert result["resizeErrors"] == 0, result
+    # Context loss/restore while oversized must recover, not brick the chart.
+    assert result["recoveryError"] is None, result
+    assert result["rootStateAfterRestore"] == "ready", result
+    assert result["ctxStampAfterRestore"] == "live", result
+    assert result["rootTextIsErrorCard"] is False, result
+    assert result["litAfterRestore"] > 0, result
+
+
+_OVERSIZED_NATIVE_CONTROL_PROBE = r"""
+  (async () => {
+    const uncaughtErrors = [];
+    window.addEventListener("error", (event) => {
+      uncaughtErrors.push(String(event && event.error && event.error.stack || event && event.message || event));
+    });
+    const sharedOverride = window.XY_SHARED_WEBGL;
+    try {
+      window.XY_SHARED_WEBGL = false;
+      document.body.style.cssText = "margin:0;overflow:hidden";
+      const holder = document.getElementById("chart");
+      holder.replaceChildren();
+      holder.style.cssText = "width:8300px;height:400px;overflow:hidden";
+      const view = xy.renderStandalone(holder, spec, buf);
+      if (view._glHost) throw new Error("native control probe unexpectedly acquired a shared host");
+      view._drawNow();
+      view._raf = null;
+      await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+      const gl = view.gl;
+      const w = view.canvas.width;
+      const h = view.canvas.height;
+      const px = new Uint8Array(w * h * 4);
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      let lit = 0;
+      for (let offset = 0; offset < px.length; offset += 4) {
+        if (px[offset] || px[offset + 1] || px[offset + 2] || px[offset + 3]) lit += 1;
+      }
+      document.body.setAttribute("data-xy-oversized-native-probe", JSON.stringify({
+        uncaughtErrors,
+        drawingBufferWidth: gl.drawingBufferWidth,
+        drawingBufferHeight: gl.drawingBufferHeight,
+        canvasW: w,
+        canvasH: h,
+        hostless: view._glHost === null,
+        lit,
+      }));
+    } catch (error) {
+      document.body.setAttribute(
+        "data-xy-oversized-native-probe-error",
+        String((error && error.stack) || error),
+      );
+    } finally {
+      if (sharedOverride === undefined) delete window.XY_SHARED_WEBGL;
+      else window.XY_SHARED_WEBGL = sharedOverride;
+    }
+  })();
+"""
+
+
+def test_oversized_backing_store_native_path_control(tmp_path: Path) -> None:
+    """The native per-chart path renders the same oversized canvas gracefully.
+
+    This is the degrade-gracefully behavior the shared host mirrors: the
+    driver clamps the drawing buffer, the chart paints its within-viewport
+    portion, and no uncaught error escapes. Establishes the control the
+    shared-host fix is meant to match.
+    """
+    chromium = find_chromium()
+    if chromium is None:
+        pytest.skip("Chromium unavailable")
+
+    result = run_browser_probe(
+        chromium,
+        _oversized_chart_html(_OVERSIZED_NATIVE_CONTROL_PROBE),
+        tmp_path / "shared_glhost_oversized_native.html",
+        "data-xy-oversized-native-probe",
+        label="oversized native-path control probe",
+    )
+
+    assert result["uncaughtErrors"] == [], result
+    assert result["hostless"] is True, result
+    assert result["drawingBufferWidth"] <= result["canvasW"], result
+    assert result["lit"] > 0, result
+
+
+def test_oversized_viewport_source_contract() -> None:
+    """The shared host must clamp oversized passes instead of throwing.
+
+    Guards the fix against a regression that reintroduces the hard
+    ``RangeError`` throw from commit 18d3bc4: the host must clamp the render
+    pass to ``MAX_VIEWPORT_DIMS`` and ``_ensureCapacity`` must never throw a
+    ``RangeError`` for an oversized viewport.
+    """
+    host = (ROOT / "js/src/42_glhost.ts").read_text(encoding="utf-8")
+    assert "throw new RangeError" not in host, (
+        "GLHost must not throw RangeError; oversized viewports must clamp to "
+        "MAX_VIEWPORT_DIMS like the native path's driver"
+    )
+    assert "Math.min(pixelExtent(width), this._maxViewport[0])" in host, (
+        "GLHost.render must clamp the render width to MAX_VIEWPORT_DIMS"
+    )
+    assert "Math.min(pixelExtent(height), this._maxViewport[1])" in host, (
+        "GLHost.render must clamp the render height to MAX_VIEWPORT_DIMS"
+    )
+    assert "Math.min(width, this._maxViewport[0])" in host, (
+        "GLHost._ensureCapacity must clamp capacity growth to MAX_VIEWPORT_DIMS"
+    )
+    assert "Math.min(height, this._maxViewport[1])" in host, (
+        "GLHost._ensureCapacity must clamp capacity growth to MAX_VIEWPORT_DIMS"
+    )
