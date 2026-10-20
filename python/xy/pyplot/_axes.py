@@ -56,7 +56,7 @@ from ._colors import (
     scalar_grid_rgba,
 )
 from ._fmt import parse_fmt
-from ._markers import marker_render_spec
+from ._markers import is_no_marker, marker_render_spec
 from ._mathtext import mathtext_italic_ranges, mathtext_to_unicode
 from ._plot_types import PlotTypeMixin
 from ._rc import RcParams, rc_figsize_px, rcParams
@@ -1911,6 +1911,12 @@ class Axes(PlotTypeMixin):
             # fmt with a marker and no linestyle means markers only.
             if fmarker is not None and fstyle is None:
                 per.setdefault("linestyle", "none")
+        # Matplotlib's "no marker" family ("none"/"None"/""/" ") means draw no
+        # markers; treat it like an unset marker so the existing `this_marker
+        # is not None` overlay guard skips and the marker-only `-` default
+        # keeps the line.  See `marker_render_spec` for the no-marker spec.
+        if is_no_marker(this_marker):
+            this_marker = None
         if "color" not in per:
             per["color"] = self._next_color()
         ls = per.pop("linestyle", "-")
@@ -2117,6 +2123,18 @@ class Axes(PlotTypeMixin):
         if norm is not None:
             raise not_implemented("scatter(norm=...)")
         check_unsupported(kwargs, "scatter()")
+
+        if is_no_marker(marker):
+            # Matplotlib's "no marker" spellings ("none"/"None"/""/" ") draw no
+            # markers.  Skip the scatter entry so no trace is emitted, and return
+            # a handle wrapping a detached spec so the PathCollection API
+            # (offsets/label/alpha/...) still works.  See ``marker_render_spec``.
+            entry = {
+                "x": np.asarray(x).reshape(-1),
+                "y": np.asarray(y).reshape(-1),
+                "kwargs": {"name": str(label) if label is not None else None},
+            }
+            return PathCollection(self, entry)
 
         xv = np.ma.asarray(x).reshape(-1)
         yv = np.ma.asarray(y).reshape(-1)
@@ -3688,6 +3706,12 @@ class Axes(PlotTypeMixin):
         if linestyle is not None and linestyle not in LINESTYLE_TO_DASH:
             raise ValueError(f"unsupported annotation linestyle: {linestyle!r}")
         check_unsupported(kwargs, f"ax{kind}()")
+        # Matplotlib's "no marker" spellings ("none"/"None"/""/" ") draw no
+        # endpoint markers; treat them like an unset marker so the
+        # ``if marker is not None`` endpoint-marker guard below skips.  See
+        # ``marker_render_spec`` for the no-marker spec.
+        if is_no_marker(marker):
+            marker = None
         akw: dict[str, Any] = {}
         if color is not None:
             akw["color"] = resolve_color(color)
