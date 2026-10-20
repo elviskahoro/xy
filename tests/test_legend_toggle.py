@@ -549,6 +549,192 @@ def test_browser_masked_drill_reply_keeps_filter_dirty() -> None:
     assert payload["planForcesFullWindow"] is True, payload
 
 
+_STANDALONE_TOGGLE_PROBE = """
+<script>
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  try {
+    const view = window.__fcProbeView;
+    if (!view) throw new Error("no probe view captured");
+    // Standalone (kernel-less): the retained home sample overlay is the only
+    // point representation. Keep comm null so lodSampleForView runs its
+    // overlay path (#225 — kernel-attached clients never draw it).
+    view.comm = null;
+    view._drawNow();
+    view._raf = null;
+    const g = view.gpuTraces.find((t) => t.tier === "density");
+    if (!g) throw new Error("no density trace");
+    if (!g.sampleOverlay) throw new Error("no home sample overlay at init");
+
+    // Record the sampled-tier overlay drawn in one frame (mirrors the
+    // §28 zoom-out probe): {n, alpha} when lodSampleForView returned an
+    // overlay, else null.
+    const sampleDrawn = () => {
+      let drawn = null;
+      const real = view._drawPoints;
+      view._drawPoints = function (d, xm, ym, alpha) {
+        if (d && d.tier === "sampled") drawn = { n: d.n, alpha: alpha === undefined ? 1 : alpha };
+        return real.apply(this, arguments);
+      };
+      view._drawNow();
+      view._drawPoints = real;
+      return drawn;
+    };
+    const badgeOn = () =>
+      view._reductionBadgeItems().some((i) => i.indexOf("sampled") === 0);
+
+    // Wait for legend rows to populate, then resolve by label.
+    let rows = [];
+    for (let i = 0; i < 200; i++) {
+      rows = [...document.querySelectorAll('[data-xy-slot="legend_item"]')];
+      if (rows.length >= 3) break;
+      await sleep(25);
+    }
+    if (rows.length < 3) throw new Error(`expected 3 legend rows, got ${rows.length}`);
+    const byName = (name) => rows.find((row) => row.textContent === name);
+    const click = (row) => row.dispatchEvent(new MouseEvent("click"));
+
+    const before = sampleDrawn();
+    const beforeBadge = badgeOn();
+    const overlayAliveBefore = !!g.sampleOverlay;
+    const fullN = g.sampleOverlay.n;
+
+    // Toggle category B off (the §10 density-tier path:
+    // _applyCategoryVisibility -> lodDropDensityCache + filter overlays).
+    click(byName("B"));
+    const after = sampleDrawn();
+    const afterBadge = badgeOn();
+    const afterState = {
+      sampleOverlayAlive: !!g.sampleOverlay,
+      shownOverlayIsSample: g._shownSampleOverlay === g.sampleOverlay,
+      sampleFadedOut: !!g._sampleFadedOut,
+      cacheLen: (g.densityCache || []).length,
+      cacheHasDensity: (g.densityCache || []).some((d) => d === g.density),
+      cacheOverlayIsSample: (g.densityCache || []).some(
+        (d) => d && d.overlay === g.sampleOverlay
+      ),
+      filterDirty: !!g._filterDirty,
+    };
+
+    // A second frame at home zoom: the bug stranded the overlay permanently
+    // across frames; the fix keeps it drawn every frame.
+    const after2 = sampleDrawn();
+    const after2Badge = badgeOn();
+
+    // An in-window pan (view stays inside the home window) then redraw:
+    // confirms the overlay is not stranded by a home-range pan either.
+    const v0 = view.view0;
+    const shift = (v0.x1 - v0.x0) * 0.02;
+    view.view = { x0: v0.x0 + shift, x1: v0.x1 + shift, y0: v0.y0, y1: v0.y1 };
+    const afterPan = sampleDrawn();
+    view.view = { x0: v0.x0, x1: v0.x1, y0: v0.y0, y1: v0.y1 };
+
+    // Untoggle B: kept categories keep drawing, the hidden one returns.
+    click(byName("B"));
+    const afterUntoggle = sampleDrawn();
+    const afterUntoggleBadge = badgeOn();
+
+    document.body.setAttribute(
+      "data-xy-standalone-toggle",
+      JSON.stringify({
+        fullN,
+        before, beforeBadge, overlayAliveBefore,
+        after, afterBadge, afterState,
+        after2, after2Badge,
+        afterPan,
+        afterUntoggle, afterUntoggleBadge,
+      })
+    );
+  } catch (err) {
+    document.body.setAttribute(
+      "data-xy-standalone-toggle-error",
+      String((err && err.stack) || err)
+    );
+  }
+})();
+</script>
+"""
+
+
+def test_browser_standalone_density_toggle_keeps_sample_overlay() -> None:
+    """Standalone (kernel-less) density charts: the retained home sample
+    overlay is the only point representation (#225). Toggling a legend
+    category must keep drawing the surviving (filtered) overlay at home
+    zoom — lodDropDensityCache must leave the LIVE grid in the cache so
+    lodSampleForView can still reach g.density.overlay === g.sampleOverlay.
+
+    Regression for the bug where lodDropDensityCache reset
+    ``g.densityCache = []`` (a truthy empty array), defeating the
+    ``g.densityCache || (g.density ? [g.density] : [])`` fallback in
+    lodSampleForView and permanently hiding the points tier after one
+    toggle at home zoom (the zoom-out home-restore is a no-op there, so
+    nothing ever re-added an overlay-carrying cache entry).
+    """
+    chromium = find_chromium()
+    if not chromium:
+        pytest.skip("no chromium available for the standalone toggle probe")
+
+    # 60k points: fits the 200k resolvability budget so the home sample
+    # overlay draws at full alpha at home zoom (the #225 gate suppresses
+    # it above the budget — the bug only manifests when it first draws).
+    chart, _cat, _x, _y = density_category_chart(n=60_000)
+
+    document = probe_document(chart, _STANDALONE_TOGGLE_PROBE)
+
+    with tempfile.TemporaryDirectory() as td:
+        page = Path(td) / "standalone_toggle.html"
+        payload = run_browser_probe(
+            chromium,
+            document,
+            page,
+            "data-xy-standalone-toggle",
+            label="standalone density toggle",
+        )
+
+    full_n = payload["fullN"]
+
+    # Pre-toggle: the home sample overlay draws at full alpha, badge on.
+    assert payload["overlayAliveBefore"] is True, payload
+    assert payload["before"] is not None, payload
+    assert payload["before"]["alpha"] == 1, payload
+    assert payload["before"]["n"] == full_n, payload
+    assert payload["beforeBadge"] is True, payload
+
+    # Post-toggle (the fix): the filtered overlay STILL draws at full
+    # alpha at home zoom — not null (the bug), with the badge still on.
+    after = payload["after"]
+    assert after is not None, payload
+    assert after["alpha"] == 1, payload
+    assert 0 < after["n"] < full_n, payload  # category B filtered out, rest kept
+    assert payload["afterBadge"] is True, payload
+
+    st = payload["afterState"]
+    # g.sampleOverlay survived the cache drop (the documented intent).
+    assert st["sampleOverlayAlive"] is True, payload
+    # The live grid stayed in the rebuilt cache (not a truthy empty []).
+    assert st["cacheLen"] == 1, payload
+    assert st["cacheHasDensity"] is True, payload
+    assert st["cacheOverlayIsSample"] is True, payload
+    # _drawDensitySample resolved the overlay and recorded it on the trace.
+    assert st["shownOverlayIsSample"] is True, payload
+    assert st["sampleFadedOut"] is False, payload
+    # The masked re-bin request is still armed (the fix does not elide it).
+    assert st["filterDirty"] is True, payload
+
+    # No stranding across frames at home zoom.
+    assert payload["after2"] is not None, payload
+    assert payload["after2"]["alpha"] == 1, payload
+    assert payload["after2Badge"] is True, payload
+    # No stranding across a home-range pan either.
+    assert payload["afterPan"] is not None, payload
+
+    # Untoggle restores the full overlay; kept categories kept drawing
+    # throughout and the hidden category's points return.
+    assert payload["afterUntoggle"] is not None, payload
+    assert payload["afterUntoggle"]["n"] == full_n, payload
+    assert payload["afterUntoggleBadge"] is True, payload
+
+
 def test_browser_legend_click_toggles_series() -> None:
     chromium = find_chromium()
     if not chromium:
