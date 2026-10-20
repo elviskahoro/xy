@@ -9,6 +9,7 @@ import pytest
 
 import xy
 from reflex_xy.registry import FigureRegistry
+from reflex_xy.tokens import build_plan_token
 
 
 def make_figure(n: int = 16):
@@ -496,3 +497,92 @@ def test_len_and_tokens(_fresh_registry, n):
     tokens = {registry.register(make_figure()) for _ in range(n)}
     assert len(registry) == n
     assert set(registry.tokens()) == tokens
+
+
+# -- column-tier cache-miss rebuild guard ---------------------------------
+
+
+def test_publish_columns_if_absent_inserts_when_missing(_fresh_registry):
+    """The cache-miss helper inserts a fresh generation (version 1) when no
+    column entry is current and reports that it did so (returns None)."""
+    registry = _fresh_registry
+    columns = {"x": [1.0, 2.0], "y": [3.0, 4.0]}
+    existing = registry.publish_columns_if_absent("tok", columns)
+    assert existing is None
+    entry = registry.get_columns("tok")
+    assert entry is not None
+    assert entry.version == 1
+    assert entry.columns == columns
+
+
+def test_publish_columns_if_absent_discards_stale_columns_when_a_fresher_republish_landed(
+    _fresh_registry,
+):
+    """The whole point of the cache-miss guard: a rebuild whose state read
+    predates a concurrent republish must NOT overwrite the fresher
+    generation. The stale columns are dropped and the fresher entry —
+    identity, columns, and version — is preserved unchanged."""
+    registry = _fresh_registry
+    fresh = {"x": np.linspace(0.0, 1.0, 48), "y": np.linspace(0.0, 1.0, 48)}
+    fresh_entry = registry.publish_columns("tok", fresh)
+    assert fresh_entry.version == 1
+
+    stale = {"x": np.linspace(0.0, 1.0, 12), "y": np.linspace(0.0, 1.0, 12)}
+    current = registry.publish_columns_if_absent("tok", stale)
+
+    assert current is fresh_entry
+    after = registry.get_columns("tok")
+    assert after is fresh_entry
+    assert after.version == 1
+    assert len(after.columns["x"]) == 48
+
+
+def test_publish_columns_if_absent_does_not_rebuild_or_broadcast_dependents(
+    _fresh_registry,
+):
+    """The cache-miss rebuild owns its own figure; the if-absent helper owns
+    no dependent fan-out (the republish path owns re-binding every mounted
+    plan). A mounted composite figure keeps its identity and version when a
+    rebuild inserts columns via the helper, and no broadcast is scheduled."""
+    registry = _fresh_registry
+    data_token = "xyd1|11111111-2222-4333-8444-555566667777|app.app.State|cloud"
+    digest = "ab" * 10
+    registry.bind_plan(data_token, digest)
+    composite = build_plan_token(digest, data_token)
+    composite_entry = registry.publish(composite, make_figure(), broadcast=False)
+    seen: list[str] = []
+
+    async def on_publish(tok, entry):
+        seen.append(tok)
+
+    async def main():
+        registry.attach_loop(asyncio.get_running_loop())
+        registry.on_publish(on_publish)
+        existing = registry.publish_columns_if_absent(data_token, {"x": [1.0], "y": [2.0]})
+        assert existing is None
+        await asyncio.sleep(0.05)
+
+    asyncio.run(main())
+
+    assert registry.get(composite) is composite_entry
+    assert registry.get(composite).version == composite_entry.version
+    assert seen == []  # no dependent re-bind, no broadcast from the cache-fill
+
+
+def test_publish_columns_if_absent_then_republish_bumps_version_normally(
+    _fresh_registry,
+):
+    """After the cache-miss rebuild inserts version 1, a later normal
+    republish via ``publish_columns`` still bumps the version and fans out —
+    the guard does not strand the token at its rebuild-inserted version."""
+    registry = _fresh_registry
+    data_token = "xyd1|11111111-2222-4333-8444-555566667777|app.app.State|cloud"
+    digest = "ab" * 10
+    registry.bind_plan(data_token, digest)
+    composite = build_plan_token(digest, data_token)
+    registry.publish(composite, make_figure(), broadcast=False)
+
+    assert registry.publish_columns_if_absent(data_token, {"x": [1.0], "y": [2.0]}) is None
+    republished = registry.publish_columns(data_token, {"x": [1.0, 2.0], "y": [3.0, 4.0]})
+    assert republished.version == 2
+    assert len(registry.get_columns(data_token).columns["x"]) == 2

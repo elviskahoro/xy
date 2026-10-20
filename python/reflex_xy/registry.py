@@ -592,6 +592,37 @@ class FigureRegistry:
             self._rebuild_dependent(token, digest, entry)
         return entry
 
+    def publish_columns_if_absent(
+        self, token: str, columns: dict[str, Any]
+    ) -> Optional[ColumnEntry]:
+        """Insert one rebuilt column set only if no generation is current.
+
+        A cache-miss rebuild runs user code outside the registry mutex, so a
+        normal dependency-driven republish (`data_vars._publish` →
+        `publish_columns`) may land a fresher generation while the rebuild is
+        awaiting. Re-checking under the mutex — the column-tier analog of
+        `publish_if_missing` — discards the stale rebuild's columns instead
+        of letting them overwrite the fresher generation with a newer
+        version carrying older data (the registry's "Republish ordering"
+        invariant: an older generation that finishes late can never
+        overwrite a newer one's figure).
+
+        Returns ``None`` when the rebuild's columns were inserted (the caller
+        owns using them), or the current entry when a fresher republish won
+        while awaiting (the caller must use that entry's columns). Unlike
+        `publish_columns`, this does not fan out to dependent plans: the
+        rebuild caller owns its own figure, and the republish path owns
+        re-binding every other mounted dependent.
+        """
+        with self._mutex:
+            current = self._column_entries.get(token)
+            if current is not None:
+                current.touch()
+                return current
+            entry = ColumnEntry(columns=columns, token=token, version=1)
+            self._column_entries[token] = entry
+            return None
+
     def get_columns(self, token: str) -> Optional[ColumnEntry]:
         with self._mutex:
             entry = self._column_entries.get(token)
