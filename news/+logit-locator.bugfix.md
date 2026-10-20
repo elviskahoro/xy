@@ -1,0 +1,1 @@
+Logit-scaled axes no longer render blank or drop probability decades near 0/1: the `LogitLocator` now follows Matplotlib's `nonsingular` semantics, keeping in-domain values below `1e-7` (and above `1 - 1e-7`) and expanding degenerate intervals instead of clamping the view into `[1e-7, 1 - 1e-7]` and returning no ticks.

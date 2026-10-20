@@ -426,12 +426,17 @@ class LogitLocator(Locator):
 
     def tick_values(self, vmin: float, vmax: float) -> np.ndarray:
         vmin, vmax = sorted((float(vmin), float(vmax)))
-        epsilon = 1e-7
-        if not (np.isfinite(vmin) and np.isfinite(vmax)):
-            vmin, vmax = epsilon, 1 - epsilon
-        vmin, vmax = max(vmin, epsilon), min(vmax, 1 - epsilon)
-        if vmin >= vmax:
-            return np.asarray([], dtype=float)
+        minpos = 1e-7
+        initial_range = (minpos, 1 - minpos)
+        if not (np.isfinite(vmin) and np.isfinite(vmax)) or vmax <= 0 or vmin >= 1:
+            vmin, vmax = initial_range
+        else:
+            if vmin <= 0:
+                vmin = minpos
+            if vmax >= 1:
+                vmax = 1 - minpos
+            if vmin == vmax:
+                vmin, vmax = 0.1 * vmin, 1 - 0.1 * vmin
         nbins = max(2, int(self._nbins_hint or 9)) if self._nbins == "auto" else self._nbins
         lower = (
             int(np.floor(np.log10(vmin)))
