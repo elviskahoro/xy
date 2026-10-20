@@ -6511,14 +6511,23 @@ export class ChartView {
   _allocPickTex() {
     // Sized to the canvas backing store; called again lazily after a resize
     // (from _renderPick, not _resize — no FBO churn during a drag-resize).
+    // Clamp to the GL's MAX_TEXTURE_SIZE the way the render pass clamps to
+    // MAX_VIEWPORT_DIMS: a chart whose backing store exceeds the GPU's
+    // limits (CSS size × devicePixelRatio on a software renderer reporting
+    // 8192) would otherwise fail `texImage2D` with GL_INVALID_VALUE, leaving
+    // a stale error that the restore path's `_assertContextFrameReady` reads
+    // as a fatal-looking "WebGL error 1281" and retries forever.
     const gl = this.gl;
+    const maxTex = Number(gl.getParameter(gl.MAX_TEXTURE_SIZE)) || Infinity;
+    const w = Math.min(this.canvas.width, maxTex);
+    const h = Math.min(this.canvas.height, maxTex);
     gl.bindTexture(gl.TEXTURE_2D, this.pickTex);
     const [pw, ph] = this._pickViewport();
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, pw, ph, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    this._pickW = this.canvas.width;
-    this._pickH = this.canvas.height;
+    this._pickW = w;
+    this._pickH = h;
   }
 
   // -- drawing --------------------------------------------------------------
@@ -9260,7 +9269,16 @@ export class ChartView {
   }
 
   _renderPick() {
-    if (this._pickW !== this.canvas.width || this._pickH !== this.canvas.height) {
+    // Compare against the clamped pick-buffer size, not the raw canvas size:
+    // an oversized canvas is clamped to MAX_TEXTURE_SIZE in `_allocPickTex`,
+    // so `_pickW` is intentionally smaller than `canvas.width` for oversized
+    // charts. Re-allocating every pick on that mismatch would leak FBOs and
+    // re-trigger the GL_INVALID_VALUE the clamp exists to avoid.
+    const gl = this.gl;
+    const maxTex = Number(gl.getParameter(gl.MAX_TEXTURE_SIZE)) || Infinity;
+    const desiredW = Math.min(this.canvas.width, maxTex);
+    const desiredH = Math.min(this.canvas.height, maxTex);
+    if (this._pickW !== desiredW || this._pickH !== desiredH) {
       this._allocPickTex(); // deferred resize catch-up
     }
     if (this._glHost) {
