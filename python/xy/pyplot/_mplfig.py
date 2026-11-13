@@ -2274,6 +2274,7 @@ class Figure:
             and self._supylabel_entry is None
             and not self._figure_text_entries
             and self._figure_legend is None
+            and self._shared_colorbar is None
         ):
             return charts[0]
         return None
@@ -2394,6 +2395,7 @@ class Figure:
                         figure_legend=self._figure_legend,
                         positions=positions,
                         canvas_size=None if positions is None else canvas_size,
+                        colorbar=self._shared_colorbar,
                     ).encode()
                 else:
                     data = single.to_svg().encode()
@@ -2495,6 +2497,7 @@ class Figure:
                     figure_legend=self._figure_legend,
                     positions=positions,
                     canvas_size=None if positions is None else canvas_size,
+                    colorbar=self._shared_colorbar,
                 )
         return self._html_cache
 
@@ -2513,6 +2516,7 @@ class Figure:
             and self._supylabel_entry is None
             and not self._figure_text_entries
             and self._figure_legend is None
+            and self._shared_colorbar is None
         ):
             # Matplotlib's inline backend displays figures with
             # bbox_inches="tight" and pad_inches=.1.  For the ordinary default
@@ -2573,6 +2577,9 @@ class Figure:
                 ax._padding = old_padding
             return doc, tight_width, tight_height
         doc = self._to_html()
+        from ._grid import _COLORBAR_BAND
+
+        band = _COLORBAR_BAND if self._shared_colorbar else 0
         single = self._single()
         if single is not None and self._suptitle is None:
             figure = single.figure()
@@ -2590,8 +2597,8 @@ class Figure:
             if self._suptitle:
                 size = float(self._resolved_suptitle_style()["size"])
                 content_h += round(size * 1.4) + 8  # h2 line box + top margin
-            return doc, content_w, content_h
-        return doc, width, height
+            return doc, content_w, content_h + band
+        return doc, width, height + band
 
     def _facecolor_wrapped(self, doc: str) -> str:
         """The figure facecolor behind an HTML document — matplotlib's figure

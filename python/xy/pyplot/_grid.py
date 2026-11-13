@@ -23,6 +23,7 @@ modules); everything else goes through `xy`' public surface.
 from __future__ import annotations
 
 import html as _html
+import zlib
 from typing import Any, Optional
 
 import numpy as np
@@ -252,6 +253,51 @@ def _compose_canvas(
     return canvas
 
 
+_COLORBAR_BAND = 52  # px reserved below the panels for a figure-level colorbar
+_COLORBAR_MARGIN = 0.15  # horizontal inset of the strip, as a width fraction
+_COLORBAR_OFFSET = 12  # px from the band top to the strip
+_COLORBAR_STRIP_H = 16  # strip height in px
+
+
+def _svg_colorbar(colorbar: Optional[dict[str, Any]], width: float, top: float) -> str:
+    """Horizontal gradient strip for a figure-level shared colorbar.
+
+    The gradient id is derived from the sampled colors, so standalone SVGs
+    with different colormaps inlined into one page cannot shadow each other.
+    """
+    if not colorbar:
+        return ""
+    from xy._svg import _lut
+
+    stops = _lut(colorbar.get("colormap", "viridis"), np.linspace(0.0, 1.0, 17))
+    css = "".join(
+        f'<stop offset="{i / 16:g}" stop-color="rgb({int(r)},{int(g)},{int(b)})"/>'
+        for i, (r, g, b) in enumerate(stops)
+    )
+    x0 = round(width * _COLORBAR_MARGIN)
+    gid = "xy-figure-colorbar-" + format(zlib.crc32(stops.tobytes()), "08x")
+    return (
+        '<g class="xy-figure-colorbar" data-xy-colorbar="shared">'
+        f'<defs><linearGradient id="{gid}">{css}</linearGradient></defs>'
+        f'<rect x="{x0}" y="{top + _COLORBAR_OFFSET:g}" width="{round(width * (1 - _COLORBAR_MARGIN)) - x0}" '
+        f'height="{_COLORBAR_STRIP_H}" '
+        f'fill="url(#{gid})"/></g>'
+    )
+
+
+def _html_colorbar(colorbar: Optional[dict[str, Any]]) -> str:
+    if not colorbar:
+        return ""
+    from xy._svg import _lut
+
+    stops = _lut(colorbar.get("colormap", "viridis"), np.linspace(0.0, 1.0, 17))
+    css = ",".join(f"rgb({int(r)},{int(g)},{int(b)})" for r, g, b in stops)
+    return (
+        f'<div class="xy-figure-colorbar" data-xy-colorbar="shared" style="height:{_COLORBAR_BAND}px">'
+        f'<div style="margin:{_COLORBAR_OFFSET}px {_COLORBAR_MARGIN * 100:g}% 0;height:{_COLORBAR_STRIP_H}px;background:linear-gradient(to right,{css})"></div></div>'
+    )
+
+
 def compose_html(
     charts: list[Any],
     nrows: int,
@@ -263,6 +309,7 @@ def compose_html(
     figure_legend: Optional[dict[str, Any]] = None,
     positions: Optional[list[tuple[float, float, float, float]]] = None,
     canvas_size: Optional[tuple[int, int]] = None,
+    colorbar: Optional[dict[str, Any]] = None,
 ) -> str:
     """Compose panel documents into one page.
 
@@ -360,8 +407,11 @@ def compose_html(
 </head>
 <body>
 {title_html}
+<div class="xy-figure" style="width:max-content;max-width:100%">
 <div class="xy-grid">
 {grid}
+</div>
+{_html_colorbar(colorbar)}
 </div>
 <script>{client_js}</script>
 <script>
@@ -387,6 +437,7 @@ def compose_svg(
     figure_legend: Optional[dict[str, Any]] = None,
     positions: Optional[list[tuple[float, float, float, float]]] = None,
     canvas_size: Optional[tuple[int, int]] = None,
+    colorbar: Optional[dict[str, Any]] = None,
 ) -> str:
     """Compose subplot SVGs with isolated ids into one portable SVG document.
 
@@ -479,10 +530,25 @@ def compose_svg(
             options,
             "xy-figure-legend",
         )
+    bar = _svg_colorbar(colorbar, width, height)
+    if colorbar:
+        height += _COLORBAR_BAND
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
-        f'viewBox="0 0 {width} {height}">{title}{"".join(body)}{labels}{legend}</svg>'
+        f'viewBox="0 0 {width} {height}">{title}{"".join(body)}{labels}{legend}{bar}</svg>'
     )
+
+
+def _paint_png_colorbar(canvas: np.ndarray, colorbar: dict[str, Any], top: int) -> None:
+    """Paint the shared-colorbar gradient strip into the band starting at ``top``."""
+    from xy._svg import _lut
+
+    x0 = int(canvas.shape[1] * _COLORBAR_MARGIN)
+    x1 = int(canvas.shape[1] * (1 - _COLORBAR_MARGIN))
+    y0 = top + _COLORBAR_OFFSET
+    gradient = _lut(colorbar.get("colormap", "viridis"), np.linspace(0.0, 1.0, max(2, x1 - x0)))
+    canvas[y0 : y0 + _COLORBAR_STRIP_H, x0:x1, :3] = gradient[None, :, :]
+    canvas[y0 : y0 + _COLORBAR_STRIP_H, x0:x1, 3] = 255
 
 
 def stitch_png(
@@ -583,17 +649,26 @@ def stitch_png(
     if absolute:
         assert positions is not None and canvas_size is not None
         canvas = _compose_canvas(tiles, positions, canvas_size, facecolor, scale)
+        panel_h = canvas.shape[0]
+        if colorbar:
+            band = np.empty((_COLORBAR_BAND, canvas.shape[1], 4), dtype=np.uint8)
+            band[...] = np.asarray(_raster._parse_color(facecolor), dtype=np.uint8)
+            canvas = np.concatenate([canvas, band], axis=0)
+            _paint_png_colorbar(canvas, colorbar, panel_h)
+        # Figure-fraction chrome resolves against the panel canvas only (the
+        # view excludes the colorbar band), matching the SVG/HTML exports.
+        figure_view = canvas[:panel_h]
         if suptitle:
             _blend_raster_suptitle(
-                canvas,
+                figure_view,
                 suptitle,
                 suptitle_style,
                 scale=scale,
-                title_h=canvas.shape[0],
+                title_h=panel_h,
                 absolute=True,
             )
         _blend_raster_figure_decorations(
-            canvas,
+            figure_view,
             figure_labels or [],
             figure_legend,
             scale=scale,
@@ -613,7 +688,7 @@ def stitch_png(
     ]
     suptitle_size = float((suptitle_style or {}).get("size", 14))
     title_h = round(_textblock.measure(suptitle, suptitle_size).height + 16) if suptitle else 0
-    colorbar_h = 52 if colorbar else 0
+    colorbar_h = _COLORBAR_BAND if colorbar else 0
     background = np.asarray(_raster._parse_color(facecolor), dtype=np.uint8)
     canvas = np.empty((title_h + sum(row_heights) + colorbar_h, sum(col_widths), 4), dtype=np.uint8)
     canvas[...] = background
@@ -631,15 +706,10 @@ def stitch_png(
             title_h=title_h,
         )
     if colorbar:
-        from xy._svg import _lut
-
-        x0, x1 = int(canvas.shape[1] * 0.15), int(canvas.shape[1] * 0.85)
-        y0 = title_h + sum(row_heights) + 12
-        gradient = _lut(colorbar.get("colormap", "viridis"), np.linspace(0.0, 1.0, max(2, x1 - x0)))
-        canvas[y0 : y0 + 16, x0:x1, :3] = gradient[None, :, :]
-        canvas[y0 : y0 + 16, x0:x1, 3] = 255
+        _paint_png_colorbar(canvas, colorbar, title_h + sum(row_heights))
     _blend_raster_figure_decorations(
-        canvas,
+        # Chrome resolves against the panel area only, excluding the colorbar band.
+        canvas[: canvas.shape[0] - colorbar_h],
         figure_labels or [],
         figure_legend,
         scale=scale,
