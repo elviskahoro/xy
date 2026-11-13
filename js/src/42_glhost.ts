@@ -229,9 +229,13 @@ export class GLHost {
     if (!w || !h || !this._canRun(client)) return false;
     this._enter(client);
     try {
-      this._ensureCapacity(w, h);
+      // Oversized backing stores degrade like the native path, where the
+      // driver clamps the drawing buffer, instead of throwing (blank chart).
+      const cw = Math.min(w, this._maxViewport[0]);
+      const ch = Math.min(h, this._maxViewport[1]);
+      this._ensureCapacity(cw, ch);
       if (!this._canRun(client)) return false;
-      this._resetPass(null, w, h, true);
+      this._resetPass(null, cw, ch, true);
       drawFn(this.gl);
       if (this.gl.isContextLost()) {
         this._markLost();
@@ -240,13 +244,13 @@ export class GLHost {
 
       // CanvasImageSource coordinates are top-left based while the GL viewport
       // occupies the host drawing buffer's bottom-left corner.
-      const sourceY = this.canvas.height - h;
+      const sourceY = this.canvas.height - ch;
       target2d.save();
       try {
         target2d.setTransform(1, 0, 0, 1, 0, 0);
         target2d.globalAlpha = 1;
         target2d.globalCompositeOperation = "copy";
-        target2d.drawImage(this.canvas, 0, sourceY, w, h, 0, 0, w, h);
+        target2d.drawImage(this.canvas, 0, sourceY, cw, ch, 0, 0, cw, ch);
       } finally {
         target2d.restore();
       }

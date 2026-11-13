@@ -1363,7 +1363,7 @@ def test_shared_glhost_source_contract() -> None:
 
     # Both color and pick passes reset the broad mutable WebGL state surface
     # before client code executes. Presentation copies only the rendered rect.
-    color_reset = host.index("this._resetPass(null, w, h, true);")
+    color_reset = host.index("this._resetPass(null, cw, ch, true);")
     color_draw = host.index("drawFn(this.gl);", color_reset)
     pick_reset = host.index("this._resetPass(framebuffer, w, h, false);")
     pick_draw = host.index("drawFn(this.gl);", pick_reset)
@@ -2194,3 +2194,14 @@ def test_child_frames_default_to_governed_path_and_opt_into_shared_host(
     assert opted_in["glHostMarker"] == "shared", result
     assert opted_in["presents2d"] is True, result
     assert opted_in["nonblank"] is True, result
+
+
+def test_shared_host_clamps_oversized_viewport_instead_of_throwing() -> None:
+    host = (ROOT / "js/src/42_glhost.ts").read_text(encoding="utf-8")
+    render = host.split("  render<T>(", 1)[1].split("  pick<T>(", 1)[0]
+    assert "Math.min(w, this._maxViewport[0])" in render
+    assert "Math.min(h, this._maxViewport[1])" in render
+    assert "this._ensureCapacity(cw, ch)" in render
+    assert "this._resetPass(null, cw, ch, true)" in render
+    assert "this.canvas.height - ch" in render
+    assert "0, sourceY, cw, ch, 0, 0, cw, ch" in render
