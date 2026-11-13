@@ -224,8 +224,16 @@ export class GLHost {
     height: number,
     drawFn: DrawCallback<T>,
   ): boolean {
-    const w = pixelExtent(width);
-    const h = pixelExtent(height);
+    // Clamp the pass to the GPU's MAX_VIEWPORT_DIMS the way the native
+    // per-chart path's driver silently does: a chart whose backing store
+    // (CSS size × devicePixelRatio) exceeds the limit still paints its
+    // within-viewport portion instead of throwing an uncaught RangeError out
+    // of the requestAnimationFrame draw callback. The 2D presentation canvas
+    // keeps its authored (oversized) backing store; the right/bottom strip
+    // beyond the clamped rect simply stays transparent, matching the native
+    // path's clamped drawingBuffer.
+    const w = Math.min(pixelExtent(width), this._maxViewport[0]);
+    const h = Math.min(pixelExtent(height), this._maxViewport[1]);
     if (!w || !h || !this._canRun(client)) return false;
     this._enter(client);
     try {
@@ -266,8 +274,11 @@ export class GLHost {
     height: number,
     drawFn: DrawCallback<T>,
   ): T | null {
-    const w = pixelExtent(width);
-    const h = pixelExtent(height);
+    // Clamp to MAX_VIEWPORT_DIMS the way render() does: a client FBO backing
+    // store can exceed the GPU's viewport limit the same way a 2D canvas can,
+    // and the native per-chart path's driver clams the viewport silently.
+    const w = Math.min(pixelExtent(width), this._maxViewport[0]);
+    const h = Math.min(pixelExtent(height), this._maxViewport[1]);
     if (!w || !h || !framebuffer || !this._canRun(client)) return null;
     this._enter(client);
     try {
@@ -355,14 +366,14 @@ export class GLHost {
   }
 
   private _ensureCapacity(width: number, height: number): void {
-    if (width > this._maxViewport[0] || height > this._maxViewport[1]) {
-      throw new RangeError(
-        `xy: shared WebGL viewport ${width}x${height} exceeds ` +
-        `${this._maxViewport[0]}x${this._maxViewport[1]}`,
-      );
-    }
-    const nextWidth = Math.max(this._capacityWidth, width);
-    const nextHeight = Math.max(this._capacityHeight, height);
+    // Defense in depth: callers already clamp to MAX_VIEWPORT_DIMS, but keep
+    // the grow-only capacity buffer inside the GPU's viewport limit so no
+    // future caller can wedge the host by writing a backing store larger than
+    // the driver accepts. Throwing here escaped the requestAnimationFrame
+    // draw callback uncaught and left a permanently blank chart (see commit
+    // 18d3bc4); clamp instead of throwing.
+    const nextWidth = Math.max(this._capacityWidth, Math.min(width, this._maxViewport[0]));
+    const nextHeight = Math.max(this._capacityHeight, Math.min(height, this._maxViewport[1]));
     if (nextWidth === this._capacityWidth && nextHeight === this._capacityHeight) return;
     this._capacityWidth = nextWidth;
     this._capacityHeight = nextHeight;
