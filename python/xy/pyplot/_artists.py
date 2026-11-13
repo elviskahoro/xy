@@ -223,9 +223,6 @@ class Artist:
         for companion in self._companion_entries():
             if companion is not self._entry:
                 move(companion)
-        for marker_entry in self._marker_entries():
-            if marker_entry is not self._entry:
-                marker_entry["x"], marker_entry["y"] = convert(marker_entry["x"], marker_entry["y"])
         self._transform = transform
         self._touch()
 
@@ -319,7 +316,37 @@ class Artist:
 
 
 class Line2D(Artist):
-    """Handle for plt.plot lines (and their marker overlays)."""
+    """Handle for plt.plot lines (and their marker overlays).
+
+    ``plot(..., marker=...)`` reaches the spec as a line entry followed by an
+    adjacent scatter overlay, but matplotlib exposes one ``Line2D`` for both.
+    The overlay hangs off `_companion_entries` so the mutations that mean "the
+    whole artist" — visibility, alpha, color, zorder, removal — move it too,
+    matching the `Patch` invariant. Without that, `set_visible(False)` would
+    hide the line and leave the markers drawn, `set_alpha(0.5)` would fade the
+    line and leave the markers opaque, and `remove()` would orphan the markers
+    with no handle left to take them down.
+    """
+
+    def _companion_entries(self) -> list[dict[str, Any]]:
+        return self._marker_entries()
+
+    def remove(self) -> None:
+        # `_marker_entries` locates the overlay by adjacency, so it must run
+        # before the line entry itself is popped — after that the search finds
+        # nothing and the overlay would be orphaned, just like the bug.
+        for entry in self._marker_entries():
+            if entry is not self._entry:
+                self._axes._remove_entry(entry)
+        super().remove()
+
+    def set_zorder(self, level: float) -> None:
+        # Keep the overlay on the line's zorder layer so the adjacency the
+        # overlay is located by survives `set_zorder`'s re-sort of `_entries`.
+        for entry in self._marker_entries():
+            if entry is not self._entry:
+                entry["_zorder"] = float(level)
+        super().set_zorder(level)
 
     @staticmethod
     def _segment_args_from_xy(x: Any, y: Any) -> tuple[Any, Any, Any, Any]:
