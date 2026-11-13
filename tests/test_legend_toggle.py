@@ -709,3 +709,54 @@ def test_legend_vis_cache_bytes_is_counted_in_resident_total() -> None:
         + report["bin_color_bytes"]
         + report["legend_vis_cache_bytes"]
     )
+
+
+_STANDALONE_SAMPLE_PROBE = """
+<script>
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  try {
+    const view = window.__fcProbeView;
+    if (!view) throw new Error("no probe view captured");
+    const g = view.gpuTraces[0];
+    view._drawNow();
+    const before = !!g._shownSampleOverlay;
+    let rows = [];
+    for (let i = 0; i < 200; i++) {
+      rows = [...document.querySelectorAll('[data-xy-slot="legend_item"]')];
+      if (rows.length >= 3) break;
+      await sleep(25);
+    }
+    if (rows.length < 3) throw new Error(`expected 3 category rows, got ${rows.length}`);
+    rows.find((row) => row.textContent === "B").dispatchEvent(new MouseEvent("click"));
+    await sleep(50);
+    view._drawNow();
+    document.body.setAttribute(
+      "data-xy-standalone-sample",
+      JSON.stringify({ before, after: !!g._shownSampleOverlay, alive: !!g.sampleOverlay })
+    );
+  } catch (err) {
+    document.body.setAttribute("data-xy-standalone-sample-error", String((err && err.stack) || err));
+  }
+})();
+</script>
+"""
+
+
+def test_browser_standalone_density_toggle_keeps_sample_overlay() -> None:
+    """Kernel-less (standalone) density chart: toggling a legend category
+    must keep drawing the filtered home sample overlay, not strand it by
+    emptying the density cache the sample selector reads."""
+    chromium = find_chromium()
+    if not chromium:
+        pytest.skip("no chromium available for the standalone toggle probe")
+    chart, *_ = density_category_chart(60_000)
+    document = probe_document(chart, _STANDALONE_SAMPLE_PROBE)
+    with tempfile.TemporaryDirectory() as td:
+        page = Path(td) / "standalone_toggle.html"
+        payload = run_browser_probe(
+            chromium, document, page, "data-xy-standalone-sample", label="standalone toggle"
+        )
+    assert payload["before"] is True, payload
+    assert payload["alive"] is True, payload
+    assert payload["after"] is True, payload
