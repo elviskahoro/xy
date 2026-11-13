@@ -768,7 +768,7 @@ export function lodDropDensityCache(view, g) {
       old.overlay = null;
     }
   }
-  g.densityCache = [];
+  g.densityCache = g.density ? [g.density] : [];
 }
 
 // A retired cached window that covers the view swaps back in as the live
