@@ -204,7 +204,7 @@ _ALLOWED_ATTRS: dict[str, frozenset[str]] = {
     "text": frozenset(
         {"x", "y", "transform", "text-anchor", "font-size", "font-weight", "fill", "fill-opacity"}
     ),
-    "tspan": frozenset({"x", "y"}),
+    "tspan": frozenset({"x", "y", "dy"}),
     "image": frozenset({"x", "y", "width", "height", "preserveAspectRatio", "style", "href"}),
 }
 
@@ -1092,19 +1092,20 @@ class _Converter:
         if tspans:
             if el.text and el.text.strip():
                 _unsupported("<text> mixing direct text and <tspan>")
+            # SVG text positioning: a tspan without x/y continues from the
+            # parent <text> (or the previous tspan); ``dy`` shifts cumulatively.
+            cur_x = _float(el.get("x"), 0.0, "x")
+            cur_y = _float(el.get("y"), 0.0, "y")
             for ts in tspans:
                 if _local(ts.tag) != "tspan":
                     _unsupported(f"<text> child <{_local(ts.tag)}>")
                 _check_attrs(ts, "tspan", _ALLOWED_ATTRS["tspan"])
                 if list(ts):
                     _unsupported("nested <tspan>")
-                runs.append(
-                    (
-                        _float(ts.get("x"), 0.0, "tspan x"),
-                        _float(ts.get("y"), 0.0, "tspan y"),
-                        ts.text or "",
-                    )
-                )
+                cur_x = _float(ts.get("x"), cur_x, "tspan x")
+                cur_y = _float(ts.get("y"), cur_y, "tspan y")
+                cur_y += _float(ts.get("dy"), 0.0, "tspan dy")
+                runs.append((cur_x, cur_y, ts.text or ""))
         else:
             runs.append(
                 (_float(el.get("x"), 0.0, "x"), _float(el.get("y"), 0.0, "y"), el.text or "")
