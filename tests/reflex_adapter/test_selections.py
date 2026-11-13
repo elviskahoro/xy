@@ -51,3 +51,38 @@ def test_resolve_selection_returns_none_for_clear_unknown_and_garbage(_fresh_reg
     )
     assert reflex_xy.resolve_selection({}) is None
     assert reflex_xy.resolve_selection(None) is None
+
+
+def test_resolve_selection_serializes_with_append_and_discards_stale(_fresh_registry):
+    fig = Figure().scatter(np.arange(6.0), np.arange(6.0))
+    token = registry.register(fig)
+    entry = registry.get(token)
+    event = _event(
+        token,
+        {"kind": "box", "data_bounds": {"x0": 1, "x1": 3, "y0": 0, "y1": 4}},
+    )
+    # Holding the figure lock must block the resolver (kernel call is guarded).
+    import threading
+
+    out = []
+    entry.sync_lock.acquire()
+    t = threading.Thread(target=lambda: out.append(reflex_xy.resolve_selection(event)))
+    t.start()
+    t.join(0.3)
+    assert t.is_alive() and not out
+    entry.sync_lock.release()
+    t.join(5)
+    assert out[0] is not None
+    assert entry.active_operations == 0
+
+    # A generation replaced mid-resolve is discarded, and the lease released.
+    orig = entry.figure.select_range
+
+    def republish(*a, **k):
+        res = orig(*a, **k)
+        registry.publish(token, Figure().scatter(np.arange(6.0), np.arange(6.0)))
+        return res
+
+    entry.figure.select_range = republish
+    assert reflex_xy.resolve_selection(event) is None
+    assert entry.active_operations == 0

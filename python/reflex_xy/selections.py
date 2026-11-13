@@ -29,20 +29,28 @@ def resolve_selection(event: Any) -> Selection | None:
             return None
         if selection.get("cleared") or selection.get("kind") == "clear":
             return None
-        entry = registry.get(token)
+        kind = selection.get("kind")
+        if kind not in ("box", "lasso"):
+            return None
+        # Same discipline as every other kernel call site: pin the generation,
+        # serialize against append mutation, and discard a superseded result.
+        entry = registry._acquire_operation(token)
         if entry is None:
             return None
-        kind = selection.get("kind")
-        if kind == "box":
-            bounds = selection["data_bounds"]
-            per_trace = entry.figure.select_range(
-                bounds["x0"], bounds["x1"], bounds["y0"], bounds["y1"]
-            )
-        elif kind == "lasso":
-            per_trace = entry.figure.select_polygon(selection["polygon"])
-        else:
-            return None
-        resolved = Selection(entry.figure, per_trace)
+        try:
+            with entry.sync_lock:
+                if kind == "box":
+                    bounds = selection["data_bounds"]
+                    per_trace = entry.figure.select_range(
+                        bounds["x0"], bounds["x1"], bounds["y0"], bounds["y1"]
+                    )
+                else:
+                    per_trace = entry.figure.select_polygon(selection["polygon"])
+                resolved = Selection(entry.figure, per_trace)
+            if not registry.is_current(token, entry):
+                return None
+        finally:
+            registry._release_operation(entry)
         return resolved if len(resolved) else None
     except (IndexError, KeyError, TypeError, ValueError):
         return None
