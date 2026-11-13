@@ -1369,3 +1369,22 @@ def test_chunk_parts_join_to_the_canonical_chunk():
         canonical = struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
         assert b"".join(_png._chunk_parts(tag, data)) == canonical
         assert _png._chunk(tag, data) == canonical
+
+
+def test_direct_rgba_colors_survive_continuous_size_channel():
+    """Per-point RGBA colors must not collapse to one color when sizes vary."""
+    fig = Figure(width=300, height=200)
+    colors = np.array(
+        [[1, 0, 0, 1], [0, 1, 0, 1], [0, 0, 1, 1], [1, 1, 0, 1], [1, 0, 1, 1]],
+        dtype=float,
+    )
+    fig.scatter(
+        np.arange(5, dtype=float),
+        np.arange(5, dtype=float),
+        color=colors,
+        size=np.array([6.0, 8.0, 10.0, 12.0, 14.0]),
+    )
+    img = _raster.render_raster(*fig.build_payload(), scale=1)
+    px = img[..., :3].reshape(-1, 3)
+    for rgb in [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255)]:
+        assert (px == rgb).all(axis=1).sum() > 0, rgb
