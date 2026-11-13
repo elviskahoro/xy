@@ -218,3 +218,23 @@ def test_round_trip_via_external_oracle(tmp_path: Path) -> None:
         assert list(tmp_path.glob("page*.png"))
     else:
         pytest.skip("no external PDF oracle (qpdf/mutool/pdftoppm) on PATH")
+
+
+def test_multiline_title_exports_pdf():
+    """Wrapped titles emit dy-relative tspans; PDF must place them (#32)."""
+    from xy._figure import Figure
+
+    title = "A very long chart title that will certainly wrap " * 3
+    pdf = Figure(width=640, height=360, title=title).to_image(format="pdf")
+    assert pdf.startswith(b"%PDF")
+
+
+def test_tspan_dy_is_cumulative_from_parent_y():
+    from xy import _pdf
+
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">'
+        '<text x="10" y="20" font-size="10" fill="#000">'
+        '<tspan x="10">a</tspan><tspan x="10" dy="12">b</tspan></text></svg>'
+    )
+    assert _pdf.svg_to_pdf(svg).startswith(b"%PDF")
