@@ -9298,7 +9298,7 @@ export class ChartView {
     let py = Math.round((this.plot.h - cssY) * this.dpr); // GL origin bottom-left
     if (px < 0 || py < 0 || px >= this.canvas.width || py >= this.canvas.height) return null;
     // Oversized backing stores: the pick pass is clamped to MAX_VIEWPORT_DIMS
-    // (shared host and native driver alike), so scale into the clamped corner.
+    // and MAX_TEXTURE_SIZE (see _pickViewport), so scale into the clamped corner.
     const [vpW, vpH] = this._pickViewport();
     if (vpW < this.canvas.width) px = Math.min(vpW - 1, Math.floor((px * vpW) / this.canvas.width));
     if (vpH < this.canvas.height) py = Math.min(vpH - 1, Math.floor((py * vpH) / this.canvas.height));
