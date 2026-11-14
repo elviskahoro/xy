@@ -237,4 +237,11 @@ def test_tspan_dy_is_cumulative_from_parent_y():
         '<text x="10" y="20" font-size="10" fill="#000">'
         '<tspan x="10">a</tspan><tspan x="10" dy="12">b</tspan></text></svg>'
     )
-    assert _pdf.svg_to_pdf(svg).startswith(b"%PDF")
+    content = _content(_pdf.svg_to_pdf(svg))
+    ys = [
+        float(m.group(1))
+        for m in re.finditer(
+            rb"-?[\d.]+ -?[\d.]+ -?[\d.]+ -?[\d.]+ -?[\d.]+ (-?[\d.]+) Tm", content
+        )
+    ]
+    assert ys == [20.0, 32.0]
