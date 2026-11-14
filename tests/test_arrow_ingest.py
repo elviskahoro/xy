@@ -120,3 +120,37 @@ def test_string_arrow_array_is_rejected_cleanly():
     arrow = pa.array(["a", "b"])
     with pytest.raises(ValueError, match="real numeric or datetime-like"):
         ColumnStore().ingest(arrow)
+
+
+def test_boolean_arrow_array_is_rejected_cleanly():
+    # Null-free bool arrays are bit-packed: `to_numpy()` (zero-copy) raises
+    # ArrowInvalid, which previously fell through to a silent float64 cast.
+    arrow = pa.array([True, False, True])
+    with pytest.raises(ValueError, match="real numeric or datetime-like, not boolean"):
+        ColumnStore().ingest(arrow)
+
+
+def test_boolean_arrow_array_with_nulls_is_rejected_cleanly():
+    # The null path also took the float64 fall-through, turning bools into
+    # 0.0/1.0 and nulls into NaN; it must reject identically.
+    arrow = pa.array([True, None, False])
+    with pytest.raises(ValueError, match="real numeric or datetime-like, not boolean"):
+        ColumnStore().ingest(arrow)
+
+
+def test_boolean_chunked_array_is_rejected_cleanly():
+    # Multi-chunk ChunkedArray (a Table column) of booleans concatenates
+    # first, then hits the same rejection before the cast.
+    arrow = pa.chunked_array([pa.array([True, False]), pa.array([True, False])])
+    with pytest.raises(ValueError, match="real numeric or datetime-like, not boolean"):
+        ColumnStore().ingest(arrow)
+
+
+def test_boolean_arrow_rejection_does_not_mutate_store():
+    # Rejection must be atomic: a failed ingest leaves the store empty,
+    # mirroring the NumPy-path guarantees in test_figure.py.
+    store = ColumnStore()
+    with pytest.raises(ValueError, match="not boolean"):
+        store.ingest(pa.array([True, False, True]))
+    assert len(store) == 0
+    assert store.columns == []

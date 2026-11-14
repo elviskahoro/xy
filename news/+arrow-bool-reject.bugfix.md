@@ -1,0 +1,1 @@
+Reject boolean pyarrow coordinate columns instead of silently coercing them to 0.0/1.0 floats, matching the NumPy ingest path and the documented dtype contract.
