@@ -6497,13 +6497,22 @@ export class ChartView {
     this._pickDirty = true;
   }
 
+  /** Pick-buffer extent: the backing store clamped to MAX_VIEWPORT_DIMS. */
+  _pickViewport(): [number, number] {
+    const maxVp = this.gl.getParameter(this.gl.MAX_VIEWPORT_DIMS);
+    return [
+      Math.min(this.canvas.width, Number(maxVp[0])),
+      Math.min(this.canvas.height, Number(maxVp[1])),
+    ];
+  }
+
   _allocPickTex() {
     // Sized to the canvas backing store; called again lazily after a resize
     // (from _renderPick, not _resize — no FBO churn during a drag-resize).
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D, this.pickTex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, this.canvas.width, this.canvas.height, 0,
-      gl.RGBA, gl.UNSIGNED_BYTE, null);
+    const [pw, ph] = this._pickViewport();
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, pw, ph, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     this._pickW = this.canvas.width;
@@ -9170,7 +9179,8 @@ export class ChartView {
   _renderPickPass() {
     const gl = this.gl;
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.pickFbo);
-    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    const [pvw, pvh] = this._pickViewport();
+    gl.viewport(0, 0, pvw, pvh);
     gl.disable(gl.BLEND);
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
@@ -9287,9 +9297,7 @@ export class ChartView {
     if (px < 0 || py < 0 || px >= this.canvas.width || py >= this.canvas.height) return null;
     // Oversized backing stores: the pick pass is clamped to MAX_VIEWPORT_DIMS
     // (shared host and native driver alike), so scale into the clamped corner.
-    const maxVp = gl.getParameter(gl.MAX_VIEWPORT_DIMS);
-    const vpW = Math.min(this.canvas.width, Number(maxVp[0]));
-    const vpH = Math.min(this.canvas.height, Number(maxVp[1]));
+    const [vpW, vpH] = this._pickViewport();
     if (vpW < this.canvas.width) px = Math.min(vpW - 1, Math.floor((px * vpW) / this.canvas.width));
     if (vpH < this.canvas.height) py = Math.min(vpH - 1, Math.floor((py * vpH) / this.canvas.height));
     const buf = new Uint8Array(4);

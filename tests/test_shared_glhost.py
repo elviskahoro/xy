@@ -2213,4 +2213,5 @@ def test_pick_pass_and_readback_use_the_clamped_viewport() -> None:
     pick = host.split("  pick<T>(", 1)[1].split("recycleSurface", 1)[0]
     assert "Math.min(w, this._maxViewport[0])" in pick
     assert "Math.min(h, this._maxViewport[1])" in pick
-    assert "gl.MAX_VIEWPORT_DIMS" in view.split("_pickAt(cssX, cssY)", 1)[1]
+    assert "_pickViewport()" in view.split("_pickAt(cssX, cssY)", 1)[1]
+    assert "gl.MAX_VIEWPORT_DIMS" in view.split("_pickViewport()", 1)[1]
