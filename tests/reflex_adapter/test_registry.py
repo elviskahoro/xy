@@ -496,3 +496,24 @@ def test_len_and_tokens(_fresh_registry, n):
     tokens = {registry.register(make_figure()) for _ in range(n)}
     assert len(registry) == n
     assert set(registry.tokens()) == tokens
+
+
+def test_column_cache_fill_never_overwrites_a_fresher_republish(_fresh_registry):
+    """A cache-miss rebuild that read state before a concurrent republish must
+    adopt the fresher columns, not stamp its stale read with a newer version."""
+    registry = _fresh_registry
+    token = "xydata-race"
+    stale = {"x": np.zeros(12)}
+    fresh = {"x": np.zeros(48)}
+    registry.publish_columns(token, fresh)  # republish lands during the await
+    entry = registry.publish_columns_if_absent(token, stale)
+    assert entry.columns is fresh
+    assert registry.get_columns(token).columns is fresh
+    assert registry.get_columns(token).version == 1
+
+
+def test_column_cache_fill_installs_when_absent(_fresh_registry):
+    registry = _fresh_registry
+    cols = {"x": np.zeros(4)}
+    assert registry.publish_columns_if_absent("xydata-miss", cols).columns is cols
+    assert registry.get_columns("xydata-miss").columns is cols

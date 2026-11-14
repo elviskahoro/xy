@@ -592,6 +592,26 @@ class FigureRegistry:
             self._rebuild_dependent(token, digest, entry)
         return entry
 
+    def publish_columns_if_absent(self, token: str, columns: dict[str, Any]) -> ColumnEntry:
+        """Cache-fill for a cache-miss rebuild: install `columns` only if no
+        entry exists, and return the entry now current. A republish that
+        landed while the rebuild awaited user code wins, so stale columns can
+        never be stamped with a newer version. When it does install (the entry
+        was absent, e.g. swept), dependents re-bind so siblings over the same
+        data do not keep serving a pre-eviction figure. Residual race: a
+        release_columns during the await is not detected."""
+        with self._mutex:
+            current = self._column_entries.get(token)
+            if current is not None:
+                current.touch()
+                return current
+            entry = ColumnEntry(columns=columns, token=token, version=1)
+            self._column_entries[token] = entry
+            digests = sorted(self._digests_by_data_token.get(token, ()))
+        for digest in digests:
+            self._rebuild_dependent(token, digest, entry)
+        return entry
+
     def get_columns(self, token: str) -> Optional[ColumnEntry]:
         with self._mutex:
             entry = self._column_entries.get(token)
