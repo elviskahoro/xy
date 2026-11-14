@@ -416,6 +416,7 @@ class FigureRegistry:
         *,
         guard: object,
         pinned: bool = False,
+        plan_bound: Optional[tuple[str, str]] = None,
     ) -> tuple[Optional[FigureEntry], bool]:
         """Conditionally insert one rebuilt generation if its guard is current.
 
@@ -429,6 +430,19 @@ class FigureRegistry:
         mutation invalidated ``guard`` and left the token absent. The caller
         owns fan-out for an inserted rebuild; an existing entry's original
         publisher owns its broadcast.
+
+        ``plan_bound`` is the optional ``(data_token, digest)`` of a composite
+        plan token. When provided AND this call inserts a fresh generation,
+        the binding is added to ``_digests_by_data_token`` under the same
+        mutex hold, so any ``publish_columns`` that observes the new entry
+        also observes its digest and fans out to it. This closes the
+        cold-subscribe race where a column republish landing between the
+        rebuild attempt's insert and the subscribe path's ``bind_plan`` would
+        otherwise snapshot an empty digest set and never rebuild this plan.
+        Every unmount transition (failed-broadcast cleanup, release, sweep,
+        unsubscribe/disconnect) funnels through
+        ``_unbind_plan_if_unmounted_locked``, so a binding added here for an
+        attempt that ultimately fails is still reaped.
         """
         with self._mutex:
             entry = self._entries.get(token)
@@ -441,6 +455,15 @@ class FigureRegistry:
             version = self._evicted_versions.pop(token, 0) + 1
             entry = FigureEntry(figure=figure, token=token, version=version, pinned=pinned)
             self._entries[token] = entry
+            if plan_bound is not None:
+                # Bind the plan atomically with the entry's insertion: a
+                # column republish routes through ``_digests_by_data_token``
+                # under this same mutex, so one that observes the entry also
+                # observes its digest. Ordering the index write after the
+                # entry insert keeps ``_unbind_plan_if_unmounted_locked``'s
+                # ``token in self._entries`` mount check consistent.
+                data_token, digest = plan_bound
+                self._digests_by_data_token.setdefault(data_token, set()).add(digest)
             return entry, True
 
     def register(self, figure: "Figure") -> str:
