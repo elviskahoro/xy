@@ -2082,3 +2082,23 @@ def test_gallery_upload_requires_actual_artifact_name(tmp_path, replacement):
         "upload" in error and "ci-gallery-ffmpeg" in error
         for error in verify_ci_workflow.validate_ci_workflow(path)
     )
+
+
+def test_toolchain_pins_accept_current_files() -> None:
+    assert _load_verify_module().validate_toolchain_pins() == []
+
+
+def test_toolchain_pins_detect_drift(tmp_path: Path) -> None:
+    module = _load_verify_module()
+    main_py = tmp_path / "main.py"
+    main_py.write_text(module.DEFAULT_CI_MAIN.read_text().replace("rust:1.99.1", "rust:1.0.0"))
+    rwx = tmp_path / "tests.yml"
+    rwx.write_text(
+        module.DEFAULT_RWX_TESTS.read_text()
+        .replace("v=0.21.8", "v=0.1.0")
+        .replace("uv/0.13.5", "uv/0.1.0")
+    )
+    errors = module.validate_toolchain_pins(main_py, rwx)
+    assert any("RUST_IMAGE" in e for e in errors)
+    assert any("uv install" in e for e in errors)
+    assert any("Dagger" in e for e in errors)

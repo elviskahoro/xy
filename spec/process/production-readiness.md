@@ -805,7 +805,9 @@ Two consequences of where the build sits:
 
 Because the release workflows are the tool's output, this repository does not
 re-assert their contents: `reflex-release` tests those invariants where it lives,
-and `scripts/verify_ci_workflow.py` covers only `ci.yml` and `codspeed.yml`. The
+and `scripts/verify_ci_workflow.py` covers `ci.yml` and `codspeed.yml`, plus the Rust/Node/uv/Dagger pins duplicated in
+`ci/main.py`, `.rwx/tests.yml` and `ci/pyproject.toml` (checked against the `ci.yml` pins; the
+Python pin is intentionally not compared). The
 action pins follow the same line — `tests/test_verify_ci_workflow.py` applies
 xy's one-SHA-per-action policy to the workflows xy authors, including
 `build_release_artifacts.yml`, and leaves the generated four to the tool.
