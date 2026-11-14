@@ -91,6 +91,31 @@ def test_reference_histogram_counts_edges_density_cumulative_and_stacking(option
     assert len(xycontainers) == len(mplcontainers)
 
 
+@pytest.mark.parametrize(
+    "lineoffsets",
+    [1, 5, [5], 0.5],
+)
+def test_reference_eventplot_scalar_lineoffsets_match_matplotlib_stagger(lineoffsets) -> None:
+    """A scalar/length-1 ``lineoffsets`` must stagger like Matplotlib 3.11.
+
+    Matplotlib converts a length-1 ``lineoffsets`` into cumulative offsets
+    (``tile`` + ``[0]=0`` + ``cumsum``) when there is more than one dataset, so
+    the default multi-dataset layout places one row per dataset instead of
+    overlapping every series on a single row.
+    """
+    positions = [[1, 2, 3], [4, 5], [6]]
+    _xyfig, xyax = xyplt.subplots()
+    _mplfig, mplax = mplplt.subplots()
+    xyax.eventplot(positions, lineoffsets=lineoffsets)
+    mplax.eventplot(positions, lineoffsets=lineoffsets)
+    mpl_offsets = [float(c.get_lineoffset()) for c in mplax.collections]
+    assert len(set(mpl_offsets)) == len(positions)  # matplotlib: one row per dataset
+    xy_offsets = [
+        float(np.unique(np.asarray(e["args"][1], dtype=np.float64))[0]) for e in xyax._entries
+    ]
+    np.testing.assert_allclose(xy_offsets, mpl_offsets)
+
+
 def test_reference_image_extent_dimensions_origin_and_normalization_domain() -> None:
     data = np.arange(12.0).reshape(3, 4)
     extent = (10.0, 14.0, -2.0, 1.0)

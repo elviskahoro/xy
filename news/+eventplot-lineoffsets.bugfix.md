@@ -1,0 +1,1 @@
+Fixed `eventplot` so a scalar (or length-1) `lineoffsets` — including the default — now staggers one row per dataset (0, stride, 2*stride, …) like Matplotlib, instead of overlapping every dataset on a single row.
