@@ -250,7 +250,7 @@ export class GLHost {
         target2d.setTransform(1, 0, 0, 1, 0, 0);
         target2d.globalAlpha = 1;
         target2d.globalCompositeOperation = "copy";
-        target2d.drawImage(this.canvas, 0, sourceY, cw, ch, 0, 0, cw, ch);
+        target2d.drawImage(this.canvas, 0, sourceY, cw, ch, 0, 0, w, h);
       } finally {
         target2d.restore();
       }
