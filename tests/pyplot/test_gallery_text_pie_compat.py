@@ -271,6 +271,26 @@ def test_mathtext_italic_ranges_preserve_source_command_provenance(
     assert mathtext_italic_ranges(source) == (rendered, ranges)
 
 
+@pytest.mark.parametrize(
+    ("source", "rendered", "ranges"),
+    [
+        # \text{...} is text mode: spaces are retained and the whole span is
+        # upright (no italic range), matching matplotlib PR #22173.
+        (r"$\text{Water level}$", "Water level", []),
+        (r"$\text{Water level (m)}$", "Water level (m)", []),
+        (r"$\text{Flow rate} x+\pi$", "Flow ratex+π", [(9, 10), (11, 12)]),
+        # math font groups keep dropping spaces; only the bare variable is italic.
+        (r"$\mathrm{max depth}+x$", "maxdepth+x", [(9, 10)]),
+    ],
+)
+def test_mathtext_italic_ranges_retain_text_wrapper_spaces(
+    source: str,
+    rendered: str,
+    ranges: list[tuple[int, int]],
+) -> None:
+    assert mathtext_italic_ranges(source) == (rendered, ranges)
+
+
 def test_mathtext_operator_stays_upright_next_to_italic_variable_in_svg() -> None:
     fig, ax = plt.subplots()
     label = ax.text(0, 0, r"$\Sigma x$")
