@@ -275,7 +275,14 @@ export class GLHost {
     if (!w || !h || !framebuffer || !this._canRun(client)) return null;
     this._enter(client);
     try {
-      this._resetPass(framebuffer, w, h, false);
+      // Same clamp as render(): the pick pass fills the clamped corner and
+      // callers scale their read coordinates by the same ratio.
+      this._resetPass(
+        framebuffer,
+        Math.min(w, this._maxViewport[0]),
+        Math.min(h, this._maxViewport[1]),
+        false,
+      );
       const result = drawFn(this.gl);
       if (this.gl.isContextLost()) {
         this._markLost();

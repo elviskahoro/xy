@@ -9282,9 +9282,16 @@ export class ChartView {
       }
     }
     const gl = this.gl;
-    const px = Math.round(cssX * this.dpr);
-    const py = Math.round((this.plot.h - cssY) * this.dpr); // GL origin bottom-left
+    let px = Math.round(cssX * this.dpr);
+    let py = Math.round((this.plot.h - cssY) * this.dpr); // GL origin bottom-left
     if (px < 0 || py < 0 || px >= this.canvas.width || py >= this.canvas.height) return null;
+    // Oversized backing stores: the pick pass is clamped to MAX_VIEWPORT_DIMS
+    // (shared host and native driver alike), so scale into the clamped corner.
+    const maxVp = gl.getParameter(gl.MAX_VIEWPORT_DIMS);
+    const vpW = Math.min(this.canvas.width, Number(maxVp[0]));
+    const vpH = Math.min(this.canvas.height, Number(maxVp[1]));
+    if (vpW < this.canvas.width) px = Math.min(vpW - 1, Math.floor((px * vpW) / this.canvas.width));
+    if (vpH < this.canvas.height) py = Math.min(vpH - 1, Math.floor((py * vpH) / this.canvas.height));
     const buf = new Uint8Array(4);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.pickFbo);
     if (this._glHost) gl.readBuffer(gl.COLOR_ATTACHMENT0);

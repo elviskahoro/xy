@@ -1365,7 +1365,7 @@ def test_shared_glhost_source_contract() -> None:
     # before client code executes. Presentation copies only the rendered rect.
     color_reset = host.index("this._resetPass(null, cw, ch, true);")
     color_draw = host.index("drawFn(this.gl);", color_reset)
-    pick_reset = host.index("this._resetPass(framebuffer, w, h, false);")
+    pick_reset = host.index("this._resetPass(\n        framebuffer,")
     pick_draw = host.index("drawFn(this.gl);", pick_reset)
     assert color_reset < color_draw
     assert pick_reset < pick_draw
@@ -2205,3 +2205,12 @@ def test_shared_host_clamps_oversized_viewport_instead_of_throwing() -> None:
     assert "this._resetPass(null, cw, ch, true)" in render
     assert "this.canvas.height - ch" in render
     assert "0, sourceY, cw, ch, 0, 0, w, h" in render
+
+
+def test_pick_pass_and_readback_use_the_clamped_viewport() -> None:
+    host = (ROOT / "js/src/42_glhost.ts").read_text(encoding="utf-8")
+    view = (ROOT / "js/src/50_chartview.ts").read_text(encoding="utf-8")
+    pick = host.split("  pick<T>(", 1)[1].split("recycleSurface", 1)[0]
+    assert "Math.min(w, this._maxViewport[0])" in pick
+    assert "Math.min(h, this._maxViewport[1])" in pick
+    assert "gl.MAX_VIEWPORT_DIMS" in view.split("_pickAt(cssX, cssY)", 1)[1]
