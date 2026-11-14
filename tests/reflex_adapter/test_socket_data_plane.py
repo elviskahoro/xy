@@ -1875,6 +1875,82 @@ def test_republish_bind_failure_broadcasts_err_and_releases(_fresh_registry):
     run(main())
 
 
+def test_release_columns_resyncs_and_republish_unstrands_mounted_client(_fresh_registry):
+    """Regression for the silent-strand bug: `@reflex_xy.data` returning None
+    (`release_columns`) while a client is still subscribed must NOT drop the
+    plan binding wholesale. A mounted client gets a resync err frame, the
+    binding is preserved, and the next publish_columns rebuilds and broadcasts
+    the fresh figure to the room — instead of freezing on stale pixels.
+
+    Reproduces the bug-report sequence: back-to-back deltas coalesce in the
+    client-side reducer so the empty-handle unmount never fires (the effect's
+    `liveToken` reconciles to the same composite), leaving a live
+    `_rebuildable_subscribers` entry while the server dropped the columns."""
+    app = make_plane_app()
+
+    async def main():
+        plan = plane_plan()
+        data_token = plane_data_token()
+        composite = build_plan_token(plan.digest, data_token)
+        async with data_plane_server(rebuild=make_rebuild_hook(app)) as (url, _):
+            client = await connect_client(url)
+            collector = Collector(client)
+            await client.emit("sub", {"fig": composite, "mid": "m1"}, namespace="/_xy")
+            payload = await collector.next(collector.payloads)
+            initial_version = payload["version"]
+            assert payload["fig"] == composite
+            # plan binding recorded by the subscribe path
+            assert registry._digests_by_data_token.get(data_token) == {plan.digest}
+            assert registry._rebuildable_subscribers.get(composite)
+
+            # `@reflex_xy.data` returns None: release_columns runs while the
+            # client is STILL subscribed (coalesced deltas never unmounted it
+            # client-side). The wholesale pop used to drop the binding silently
+            # and strand the room on stale pixels.
+            assert registry.get_columns(data_token) is not None
+            registry.release_columns(data_token)
+            error = await collector.next(collector.errors)
+            assert error["fig"] == composite
+            assert error["resync"] is True
+            assert error["error"] == "data released"
+
+            # The composite entry is gone (a re-mount rebuilds from current
+            # state) but the binding and the subscriber are PRESERVED —
+            # the index is still bounded by this single mounted plan.
+            assert registry.get(composite) is None
+            assert registry.get_columns(data_token) is None
+            assert registry._digests_by_data_token.get(data_token) == {plan.digest}
+            assert registry._rebuildable_subscribers.get(composite)
+
+            # Data comes back (as a state delta evaluation would trigger).
+            # publish_columns iterates the PRESERVED digest, rebuilds, and
+            # broadcasts — instead of silently iterating an empty set.
+            registry.publish_columns(
+                data_token,
+                {"x": np.linspace(0.0, 1.0, 5), "y": np.linspace(0.0, 1.0, 5)},
+            )
+            refreshed = await collector.next(collector.payloads)
+            assert refreshed["fig"] == composite
+            assert refreshed["spec"]["traces"][0]["n_points"] == 5
+            assert refreshed["version"] > initial_version
+
+            # A second transient None -> columns cycle stays unstranded: the
+            # binding survives the first release_columns, so the second
+            # publish_columns still broadcasts to the same room.
+            registry.release_columns(data_token)
+            error2 = await collector.next(collector.errors)
+            assert error2["resync"] is True
+            registry.publish_columns(
+                data_token,
+                {"x": np.linspace(0.0, 1.0, 7), "y": np.linspace(0.0, 1.0, 7)},
+            )
+            refreshed2 = await collector.next(collector.payloads)
+            assert refreshed2["spec"]["traces"][0]["n_points"] == 7
+            await client.disconnect()
+
+    run(main())
+
+
 def test_bare_data_token_is_not_a_figure(_fresh_registry):
     """A raw xyd1 token names columns, never a figure: closed, no rebuild."""
     app = make_plane_app()
