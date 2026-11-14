@@ -2,7 +2,8 @@
 
 Grammar per matplotlib: a fmt string is any interleaving of one color code
 (single letter or ``C0``–``C9``), one linestyle (``-``, ``--``, ``-.``,
-``:``), and one marker character. Empty parts are None.
+``:`` or ``" "`` for the ``_draw_nothing`` style), and one marker
+character. Empty parts are None.
 """
 
 from __future__ import annotations
@@ -51,6 +52,16 @@ def parse_fmt(fmt: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
             continue
         if ch in _MARKERS and marker is None:
             marker = ch
+            i += 1
+            continue
+        # matplotlib's ``lineStyles[' ']`` (and ``lineStyles['']``) is the
+        # ``_draw_nothing`` style: a lone space is a valid "draw no line"
+        # linestyle token. Downstream ``LINESTYLE_TO_DASH[' ']`` already maps
+        # it to the ``"none"`` sentinel, so consuming it here lets fmts such
+        # as ``' '``, ``'k '`` and ``' C1'`` parse like matplotlib (the stem
+        # ``markerfmt=' '`` idiom in particular).
+        if ch == " " and linestyle is None:
+            linestyle = " "
             i += 1
             continue
         raise ValueError(f"unrecognized character {ch!r} in format string {fmt!r} (two={two!r})")
