@@ -85,6 +85,9 @@ CI_BOOTSTRAP_INPUTS = {
     "dtolnay/rust-toolchain": ("toolchain", "1.99.1"),
     "actions/setup-python": ("python-version", "3.11.17"),
 }
+DEFAULT_CI_MAIN = ROOT / "ci" / "main.py"
+DEFAULT_RWX_TESTS = ROOT / ".rwx" / "tests.yml"
+DEFAULT_CI_PYPROJECT = ROOT / "ci" / "pyproject.toml"
 CODSPEED_ACTION_COMMIT = "f99becdce5e5d51fd556489ebef684f4ecfd6286"
 CONFORMANCE_IMAGE = "mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48"
 
@@ -1712,6 +1715,69 @@ def validate_all_workflows(
     ]
 
 
+def validate_toolchain_pins(
+    ci_main: Path = DEFAULT_CI_MAIN,
+    rwx_tests: Path = DEFAULT_RWX_TESTS,
+    ci_pyproject: Path = DEFAULT_CI_PYPROJECT,
+) -> list[str]:
+    """Check ci/main.py and .rwx/tests.yml pins against the ci.yml pins.
+
+    The Python pin is intentionally excluded: ci/main.py runs 3.12 where ci.yml
+    uses its own floor/system interpreters.
+    """
+    errors: list[str] = []
+    try:
+        main_text = ci_main.read_text()
+        rwx_text = rwx_tests.read_text()
+        pyproject_text = ci_pyproject.read_text()
+    except OSError as exc:
+        return [f"cannot read toolchain pin file: {exc}"]
+
+    rust = CI_BOOTSTRAP_INPUTS["dtolnay/rust-toolchain"][1]
+    node = CI_BOOTSTRAP_INPUTS["actions/setup-node"][1]
+    uv = CI_BOOTSTRAP_INPUTS["astral-sh/setup-uv"][1]
+
+    def constant(name: str) -> Optional[str]:
+        match = re.search(rf'^{name}\s*=\s*"([^"]*)"', main_text, re.MULTILINE)
+        return match.group(1) if match else None
+
+    for name, expected, label in (
+        ("RUST_IMAGE", f"rust:{rust}-bookworm", "Rust"),
+        ("NODE_IMAGE", f"node:{node}-bookworm-slim", "Node"),
+        ("UV_IMAGE", f"ghcr.io/astral-sh/uv:{uv}", "uv"),
+    ):
+        actual = constant(name)
+        if actual != expected:
+            errors.append(
+                f"{ci_main.name}: {name} is {actual!r}, expected {expected!r} ({label} pin from ci.yml)"
+            )
+
+    uv_urls = re.findall(r"astral\.sh/uv/([^/\s]+)/install\.sh", rwx_text)
+    if not uv_urls:
+        errors.append(f"{rwx_tests.name}: no uv install URL found")
+    for found in uv_urls:
+        if found != uv:
+            errors.append(f"{rwx_tests.name}: uv install version {found!r}, expected {uv!r}")
+
+    dagger_match = re.search(r'"dagger-io==([^"]+)"', pyproject_text)
+    if not dagger_match:
+        errors.append(f"{ci_pyproject.name}: dagger-io== pin not found")
+        return errors
+    dagger = dagger_match.group(1)
+    cli = re.findall(r"^\s*v=([0-9][^\s]*)\s*$", rwx_text, re.MULTILINE)
+    engine = re.findall(r"registry\.dagger\.io/engine:v([0-9][^\s]*)", rwx_text)
+    if not cli:
+        errors.append(f"{rwx_tests.name}: Dagger CLI version literal not found")
+    if not engine:
+        errors.append(f"{rwx_tests.name}: Dagger engine image tag not found")
+    for found in (*cli, *engine):
+        if found != dagger:
+            errors.append(
+                f"{rwx_tests.name}: Dagger version {found!r} != dagger-io=={dagger} in {ci_pyproject.name}"
+            )
+    return errors
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1740,7 +1806,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         checked = [args.codspeed_workflow]
     else:
         errors = validate_all_workflows(args.ci_workflow, args.codspeed_workflow)
-        checked = [args.ci_workflow, args.codspeed_workflow]
+        errors += validate_toolchain_pins()
+        checked = [args.ci_workflow, args.codspeed_workflow, DEFAULT_RWX_TESTS, DEFAULT_CI_MAIN]
 
     if errors:
         print(
