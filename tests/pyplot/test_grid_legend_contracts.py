@@ -32,6 +32,138 @@ def test_grid_selects_axis_and_records_supported_style():
         ax.grid(True, unsupported=True)
 
 
+def test_grid_off_then_on_restores_default_color_on_both_axes():
+    # ax.grid(True); ax.grid(False); ax.grid(True) must restore the rc-derived
+    # grid color, not leave the disable-time "transparent" sentinel persisted.
+    _, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1])
+    ax.grid(True)
+    assert ax._axis_props("x")["style"]["grid_color"] == "#b0b0b0"
+    assert ax._axis_props("y")["style"]["grid_color"] == "#b0b0b0"
+    ax.grid(False)
+    assert ax._axis_props("x")["style"]["grid_color"] == "transparent"
+    assert ax._axis_props("y")["style"]["grid_color"] == "transparent"
+    ax.grid(True)
+    assert ax._grid is True
+    assert ax._axis_props("x")["style"]["grid_color"] == "#b0b0b0"
+    assert ax._axis_props("y")["style"]["grid_color"] == "#b0b0b0"
+
+
+def test_grid_off_then_on_restores_color_in_rendered_payload():
+    # The wire payload (consumed by all three renderers) must carry the
+    # restored color, since grid_color is the sole grid visibility control.
+    _, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1])
+    ax.grid(True)
+    ax.grid(False)
+    ax.grid(True)
+    spec, _ = ax._build_chart(640, 480).figure().build_payload_split()
+    assert spec["x_axis"]["style"]["grid_color"] == "#b0b0b0"
+    assert spec["y_axis"]["style"]["grid_color"] == "#b0b0b0"
+
+
+def test_grid_never_enabled_first_then_on_restores_default_color():
+    # grid(False); grid(True) — disabling an axis whose grid was never on must
+    # not leave a "transparent" sentinel that strangles the later enable.
+    _, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1])
+    ax.grid(False)
+    ax.grid(True)
+    assert ax._axis_props("x")["style"]["grid_color"] == "#b0b0b0"
+    assert ax._axis_props("y")["style"]["grid_color"] == "#b0b0b0"
+
+
+def test_axis_proxy_grid_off_then_on_restores_default_color():
+    # The Axis.grid surface (ax.xaxis.grid / ax.yaxis.grid) forwards to the
+    # same path and must not poison the per-axis style either.
+    _, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1])
+    ax.xaxis.grid(False)
+    ax.xaxis.grid(True)
+    assert ax._axis_props("x")["style"]["grid_color"] == "#b0b0b0"
+    # The y axis was never selected; its grid stays off (transparent).
+    assert ax._axis_props("y")["style"]["grid_color"] == "transparent"
+    ax.yaxis.grid(True)
+    assert ax._axis_props("y")["style"]["grid_color"] == "#b0b0b0"
+
+
+def test_grid_single_axis_enable_does_not_poison_other_axis():
+    # ax.grid(True, axis="x") seeds the unselected y axis with the
+    # "transparent" sentinel; a later ax.grid(True, axis="y") must drop it and
+    # restore the default color rather than reading the sentinel back.
+    _, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1])
+    ax.grid(True, axis="x")
+    assert ax._axis_props("x")["style"]["grid_color"] == "#b0b0b0"
+    assert ax._axis_props("y")["style"]["grid_color"] == "transparent"
+    ax.grid(True, axis="y")
+    assert ax._axis_props("x")["style"]["grid_color"] == "#b0b0b0"
+    assert ax._axis_props("y")["style"]["grid_color"] == "#b0b0b0"
+
+
+def test_grid_minor_tier_off_then_on_restores_default_color():
+    # The minor tier carries the same bug; its round trip must restore the
+    # rc-derived grid color too.
+    _, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1])
+    ax.minorticks_on()
+    ax.grid(True, which="both")
+    ax.grid(False, which="both")
+    ax.grid(True, which="both")
+    assert ax._axis_props("x")["style"]["grid_color"] == "#b0b0b0"
+    assert ax._axis_props("y")["style"]["grid_color"] == "#b0b0b0"
+    assert ax._axis_props("x")["minor_style"]["grid_color"] == "#b0b0b0"
+    assert ax._axis_props("y")["minor_style"]["grid_color"] == "#b0b0b0"
+
+
+def test_grid_minor_fresh_enable_restores_default_color():
+    # _rc_minor_axis_style seeds grid_color="transparent" by default, so a
+    # fresh grid(True, which="minor") with no explicit color must not read
+    # that sentinel back.
+    _, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1])
+    ax.minorticks_on()
+    ax.grid(True, which="minor")
+    assert ax._axis_props("x")["minor_style"]["grid_color"] == "#b0b0b0"
+    assert ax._axis_props("y")["minor_style"]["grid_color"] == "#b0b0b0"
+
+
+def test_grid_re_enable_with_explicit_color_overrides_sentinel():
+    # The escape hatch: an explicit color= on re-enable still wins, and the
+    # round trip through off does not strand the prior color.
+    _, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1])
+    ax.grid(True)
+    ax.grid(False)
+    ax.grid(True, color="red")
+    assert ax._axis_props("x")["style"]["grid_color"] == "red"
+    assert ax._axis_props("y")["style"]["grid_color"] == "red"
+
+
+def test_grid_re_enable_with_explicit_transparent_is_respected():
+    # An author who explicitly asks for a transparent grid on re-enable must
+    # get it; the fix must not drop an authored "transparent".
+    _, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1])
+    ax.grid(True)
+    ax.grid(False)
+    ax.grid(True, color="transparent")
+    assert ax._axis_props("x")["style"]["grid_color"] == "transparent"
+    assert ax._axis_props("y")["style"]["grid_color"] == "transparent"
+
+
+def test_grid_re_enable_after_explicit_color_retains_that_color():
+    # Matching matplotlib: grid(True, color="red"); grid(False); grid(True)
+    # keeps the author's red, because the color is a persistent grid property.
+    _, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1])
+    ax.grid(True, color="red")
+    ax.grid(False)
+    ax.grid(True)
+    assert ax._axis_props("x")["style"]["grid_color"] == "red"
+    assert ax._axis_props("y")["style"]["grid_color"] == "red"
+
+
 def test_grid_linestyle_rcparam_reaches_major_and_minor_payload_styles():
     with plt.rc_context({"axes.grid": True, "grid.linestyle": "--"}):
         _, ax = plt.subplots()
