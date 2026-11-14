@@ -108,7 +108,8 @@ async def rebuild_plan_figure(app: Any, composite: ParsedPlanToken) -> Optional[
             return None
         # Future binds (other plans over the same data var) hit the cache;
         # bind_plan below is the subscribe path's job, not the rebuild's.
-        registry.publish_columns(composite.data_token, columns)
+        # A fresher republish that landed during the await wins.
+        columns = registry.publish_columns_if_absent(composite.data_token, columns).columns
     # Same label the registry's republish path builds in _rebuild_dependent:
     # one mismatch, one err frame, whichever path hits it first.
     source = f"{composite.data.state_full_name}.{composite.data.var_name}"
