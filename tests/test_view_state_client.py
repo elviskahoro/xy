@@ -1714,6 +1714,142 @@ def test_axis_band_restores_authored_cursor_after_drag(tmp_path: Path) -> None:
     }
 
 
+_AXIS_BAND_INTERLEAVED_PROBE = """
+  const view = xy.renderStandalone(document.getElementById("chart"), spec, buf);
+  try {
+    view._drawNow();
+    const ranges = () => Object.fromEntries(
+      view._axisIds().map((id) => [id, [...view._axisRange(id)]]));
+    // The y band is a vertical strip on the left of the plot: a vertical drag
+    // along it pans y; a horizontal drag across it marks a span to box-zoom.
+    const bandY = view.root.querySelector('[data-xy-axis-band="y"]');
+    if (!bandY) throw new Error("missing y axis band");
+    const rect = bandY.getBoundingClientRect();
+    const sx = rect.left + rect.width / 2;
+    const sy = rect.top + rect.height / 2;
+
+    // Deterministic frames so the coalesced `xy:view_change` rAF flushes
+    // synchronously — the pan's end-phase commit is what the kernel cache
+    // reads (view-state.md §5.1).
+    const realRaf = window.requestAnimationFrame;
+    let frames = [];
+    let ts = 0;
+    window.requestAnimationFrame = (fn) => { frames.push(fn); return frames.length; };
+    const flush = () => {
+      for (let round = 0; round < 300 && (frames.length || view._viewAnim); round++) {
+        const queued = frames; frames = [];
+        ts += 100;
+        for (const fn of queued) fn(ts);
+      }
+    };
+
+    const events = [];
+    view.root.addEventListener("xy:view_change", (e) => events.push({
+      source: e.detail.source,
+      phase: e.detail.phase,
+      ranges: e.detail.ranges,
+      interaction_id: e.detail.interaction_id,
+    }));
+    const panEnds = () => events.filter(
+      (ev) => ev.source === "pan_drag" && ev.phase === "end");
+    const pointer = (type, pointerId, x, y) => bandY.dispatchEvent(new PointerEvent(type, {
+      pointerId, clientX: x, clientY: y, bubbles: true, cancelable: true,
+    }));
+
+    // --- Control: a single-pointer span shows then clears selRect. Proves
+    // the harness and the normal cleanup path are sound.
+    view._resetView(false, "reset");
+    flush();
+    pointer("pointerdown", 101, sx, sy);
+    pointer("pointermove", 101, sx + 60, sy + 30); // across the band -> span
+    flush();
+    const spanShownNormally = view.selRect.style.display === "block"
+      && view.selRect.dataset.xyBand === "zoom";
+    pointer("pointerup", 101, sx + 60, sy + 30);
+    flush();
+    const spanClearedNormally = view.selRect.style.display === "none";
+
+    // --- Part A: a second pointer landing mid-span must not strand selRect.
+    view._resetView(false, "reset");
+    flush();
+    pointer("pointerdown", 111, sx, sy);
+    pointer("pointermove", 111, sx + 60, sy + 30); // span mode, selRect visible
+    flush();
+    const spanOverlayActive = view.selRect.style.display === "block";
+    // Second pointer taps the band mid-gesture (down + up, never reaches a mode).
+    pointer("pointerdown", 112, sx, sy);
+    pointer("pointerup", 112, sx, sy);
+    flush();
+    // First pointer releases later. Pre-fix: orphaned, selRect stayed visible.
+    pointer("pointerup", 111, sx + 60, sy + 30);
+    flush();
+    const spanClearedAfterInterleave = view.selRect.style.display === "none";
+
+    // --- Part B: a second pointer landing mid-pan must still commit pan_drag
+    // end at the pan's last in-frame view (interaction.md §5).
+    view._resetView(false, "reset");
+    flush();
+    const beforePan = ranges();
+    pointer("pointerdown", 121, sx, sy);
+    pointer("pointermove", 121, sx, sy + 50); // along the band -> pan
+    flush();
+    const panMoved = JSON.stringify(ranges().y) !== JSON.stringify(beforePan.y);
+    const viewAtPanMidpoint = ranges();
+    // Second pointer taps mid-pan; the settle runs inside this pointerdown.
+    pointer("pointerdown", 122, sx, sy);
+    pointer("pointerup", 122, sx, sy);
+    flush();
+    const endsAfterSettle = panEnds();
+    const onePanEndForPointer121 = endsAfterSettle.length === 1
+      && endsAfterSettle[0].ranges
+      && JSON.stringify(endsAfterSettle[0].ranges.y)
+        === JSON.stringify(viewAtPanMidpoint.y);
+    // First pointer's real pointerup must NOT emit a duplicate pan end.
+    pointer("pointerup", 121, sx, sy + 50);
+    flush();
+    const stillOnePanEnd = panEnds().length === 1;
+
+    // --- Part C: after the settle the band is not wedged — a fresh pointer
+    // can start, pan, and commit its own end-phase view_change.
+    pointer("pointerdown", 131, sx, sy);
+    pointer("pointermove", 131, sx, sy + 30);
+    flush();
+    const secondPanMoved = JSON.stringify(ranges().y)
+      !== JSON.stringify(viewAtPanMidpoint.y);
+    pointer("pointerup", 131, sx, sy + 30);
+    flush();
+    const allEnds = panEnds();
+    const exactlyTwoPanEnds = allEnds.length === 2;
+    const secondPanCommitted = exactlyTwoPanEnds
+      && JSON.stringify(allEnds[1].ranges.y) === JSON.stringify(ranges().y);
+
+    window.requestAnimationFrame = realRaf;
+    document.body.setAttribute("data-xy-axisband-interleaved-probe", JSON.stringify({
+      spanShownNormally, spanClearedNormally,
+      spanOverlayActive, spanClearedAfterInterleave,
+      panMoved, onePanEndForPointer121, stillOnePanEnd,
+      secondPanMoved, exactlyTwoPanEnds, secondPanCommitted,
+    }));
+  } catch (err) {
+    document.body.setAttribute(
+      "data-xy-axisband-interleaved-probe-error", String((err && err.stack) || err));
+  }
+"""
+
+
+def test_axis_band_interleaved_pointers_settle_prior_gesture(tmp_path: Path) -> None:
+    # Two pointers on the same band interleave: a second pointerdown mid-gesture
+    # must settle the in-flight one (hide its span rect, commit its pan end at
+    # the last in-frame view) rather than orphan it — interaction.md §5.
+    result = _run(
+        tmp_path,
+        _chart_html().replace(_RENDER_CALL, _AXIS_BAND_INTERLEAVED_PROBE),
+        "data-xy-axisband-interleaved-probe",
+        label="axis-band interleaved pointers probe",
+    )
+    assert result == {key: True for key in result}
+
+
 _AXIS_BAND_EXCLUDED_PROBE = """
   const view = xy.renderStandalone(document.getElementById("chart"), spec, buf);
   try {
