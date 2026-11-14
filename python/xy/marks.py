@@ -1771,6 +1771,7 @@ def error_band(
     name: Optional[str] = None,
     color: Optional[str] = None,
     opacity: float = 0.22,
+    line_color: Optional[str] = None,
     line_width: float = 0.0,
     line_opacity: float = 0.0,
     fill: Union[str, dict[str, str], None] = None,
@@ -1784,6 +1785,7 @@ def error_band(
     css = styles.compile_mark_style("error_band", style)
     color = css.get("color", color)
     opacity = css.get("opacity", opacity)
+    line_color = css.get("line_color", line_color)
     line_width = css.get("line_width", line_width)
     line_opacity = css.get("line_opacity", line_opacity)
     fill = css.get("fill", fill)
@@ -1791,6 +1793,7 @@ def error_band(
     color = self._optional_css_color(color, "error_band color")
     if color is None:
         color = self.next_series_color()
+    line_color = self._optional_css_color(line_color, "error_band line_color")
     opacity = self._opacity(opacity, "error_band opacity")
     line_width = self._nonnegative_scalar(line_width, "error_band line_width")
     line_opacity = self._opacity(line_opacity, "error_band line_opacity")
@@ -1814,6 +1817,8 @@ def error_band(
             "role": "error-band",
         }
         style.update(styles._opacity_channels(css))
+        if line_color is not None:
+            style["line_color"] = line_color
         if fill_spec is not None:
             style["fill"] = fill_spec
         self.traces.append(

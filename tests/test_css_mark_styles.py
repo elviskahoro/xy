@@ -242,6 +242,94 @@ def test_area_outline_obeys_whole_mark_and_stroke_opacity() -> None:
     assert 'stroke-opacity="0.1"' in styled.to_svg()
 
 
+def test_error_band_css_stroke_targets_the_outline_not_the_fill() -> None:
+    # `error_band` is in `_AREA_KINDS`, so its CSS `stroke` must compile to the
+    # outline paint (`line_color`) — exactly like `area` — not the fill paint
+    # (`color`). The previous `kind == "area"` test made `stroke` repaint the
+    # whole band and rejected `fill` + `stroke` together.
+    assert compile_mark_style("error_band", {"stroke": "blue"}) == {"line_color": "blue"}
+    assert compile_mark_style("error_band", {"stroke": "blue", "fill": "red"}) == {
+        "line_color": "blue",
+        "color": "red",
+    }
+    # The three stroke-* properties target the outline together, coherently.
+    assert compile_mark_style(
+        "error_band",
+        {"stroke": "blue", "stroke-width": 2, "stroke-opacity": 1.0},
+    ) == {
+        "line_color": "blue",
+        "line_width": 2.0,
+        "stroke_opacity": 1.0,
+    }
+
+
+def test_error_band_css_outline_reaches_all_renderers() -> None:
+    # `fill` paints the band and `stroke` paints an independent outline, the
+    # same contract as `area`. Verify the compiled `line_color` flows through
+    # the builder's trace style and into the SVG and native rasterizers.
+    fig = xy.chart(
+        xy.error_band(
+            x=[0.0, 1.0],
+            lower=[0.5, 1.5],
+            upper=[1.5, 2.5],
+            color="red",
+            line_width=4,
+            line_opacity=1.0,
+            opacity=1.0,
+            style={"stroke": "blue", "fill": "red"},
+        )
+    ).figure()
+
+    trace = fig.traces[0]
+    assert trace.style["line_color"] == "blue"
+    assert trace.style["color"] == "red"
+    assert trace.style["line_width"] == 4.0
+
+    svg = fig.to_svg()
+    assert 'fill="red"' in svg
+    assert 'stroke="blue"' in svg
+    assert 'stroke-width="4"' in svg
+
+    # The native rasterizer honors `line_color` for the area family outline
+    # (see `_emit_area`): at full opacity, the band fills solid red and the
+    # outline paints solid blue, so each must appear somewhere in the frame.
+    image = _raster.render_raster(*fig.build_payload(), scale=1)
+    assert np.any(np.all(image == np.array([255, 0, 0, 255], dtype=np.uint8), axis=2))
+    assert np.any(np.all(image == np.array([0, 0, 255, 255], dtype=np.uint8), axis=2))
+
+    # The built payload carries `line_color` so the WebGL client — which
+    # resolves the outline as `style.line_color || style.color` — paints the
+    # same outline color.
+    spec, _ = fig.build_payload()
+    assert spec["traces"][0]["style"]["line_color"] == "blue"
+    assert spec["traces"][0]["style"]["color"] == "red"
+
+
+def test_error_band_line_color_kwarg_cs_overrides_default() -> None:
+    # Mirror `area`: the builder exposes a `line_color` kwarg, and CSS `stroke`
+    # wins over it the same way CSS `fill`/`color` win over their kwargs.
+    fig = xy.chart(
+        xy.error_band(
+            x=[0.0, 1.0],
+            lower=[0.5, 1.5],
+            upper=[1.5, 2.5],
+            line_color="green",
+            style={"stroke": "blue"},
+        )
+    ).figure()
+    assert fig.traces[0].style["line_color"] == "blue"
+
+    fig_kw = xy.chart(
+        xy.error_band(
+            x=[0.0, 1.0],
+            lower=[0.5, 1.5],
+            upper=[1.5, 2.5],
+            line_color="green",
+        )
+    ).figure()
+    assert fig_kw.traces[0].style["line_color"] == "green"
+
+
 def test_static_invalid_paint_fallback_matches_browser_renderer() -> None:
     expected = (76, 120, 168, 255)
     assert _svg._paint_rgba8("var(--unresolved)") == expected

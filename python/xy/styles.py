@@ -365,7 +365,7 @@ def _compile_mark_style(kind: str, value: StyleMapping | None, label: str) -> di
                 target = "color"
             _set(out, target, paint, prop, seen)
         elif prop == "stroke":
-            target = "line_color" if kind == "area" else "color"
+            target = "line_color" if kind in _AREA_KINDS else "color"
             if kind in _POINT_KINDS | _RECT_KINDS | _MESH_KINDS | _RIBBON_KINDS | _FUNNEL_KINDS | {
                 "box"
             }:
