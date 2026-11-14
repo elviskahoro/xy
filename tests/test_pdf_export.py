@@ -52,6 +52,34 @@ def _content(pdf: bytes) -> bytes:
     return _stream(objs[int(match.group(1))])
 
 
+def _text_runs(content: bytes) -> list[tuple[float, float, bytes]]:
+    """One ``(tx, ty, pdf_string)`` per ``BT/ET`` glyph run in a content stream.
+
+    The generator emits a single ``BT ... Tm ... Tj ... ET`` block per text
+    run; the ``Tm`` operands are ``a b c d tx ty`` whose ``tx``/``ty`` are the
+    run's baseline in SVG user space (the top-level ``cm`` y flip and the
+    per-text ``Tm`` y flip compose to net-upright, so ``ty`` equals the SVG
+    ``y``). Used to assert multi-line chrome lines render at distinct
+    baselines instead of collapsing onto the page origin.
+    """
+    runs: list[tuple[float, float, bytes]] = []
+    in_text = False
+    tm: tuple[float, float] | None = None
+    for op in content.decode("latin1").split("\n"):
+        if op == "BT":
+            in_text = True
+            tm = None
+        elif op == "ET":
+            in_text = False
+        elif in_text:
+            if op.endswith(" Tm"):
+                parts = op.split()
+                tm = (float(parts[-3]), float(parts[-2]))
+            elif op.endswith(" Tj") and tm is not None:
+                runs.append((tm[0], tm[1], op[:-3].encode("latin1")))
+    return runs
+
+
 def _xref_offsets(pdf: bytes) -> dict[int, int]:
     """Parse the xref table, verifying each offset points at `N 0 obj`."""
     startxref = int(pdf[pdf.rindex(b"startxref") + len(b"startxref") :].split()[0])
@@ -159,6 +187,15 @@ def test_unsupported_svg_features_raise() -> None:
     # ...as does a path command outside the generator's subset.
     with pytest.raises(ValueError, match="unsupported SVG feature"):
         svg_to_pdf(f'<svg {ns} width="100" height="50"><path d="M 0 0 Q 5 5 10 0"/></svg>')
+    # ...and the multi-line tspan drift this bug fixed: the generator must
+    # keep emitting absolute per-line <tspan y="..."> rather than <tspan dy>,
+    # so the closed subset still refuses dy on a tspan (browsers would render
+    # it, but the native PDF path must not silently accept the drift again).
+    with pytest.raises(ValueError, match="unsupported SVG feature"):
+        svg_to_pdf(
+            f'<svg {ns} width="100" height="50">'
+            '<text x="10" y="20" font-size="12"><tspan x="10" dy="12">x</tspan></text></svg>'
+        )
 
 
 def test_pdf_output_is_deterministic() -> None:
@@ -218,3 +255,104 @@ def test_round_trip_via_external_oracle(tmp_path: Path) -> None:
         assert list(tmp_path.glob("page*.png"))
     else:
         pytest.skip("no external PDF oracle (qpdf/mutool/pdftoppm) on PATH")
+
+
+def _title_root(svg: str, joined: str) -> ET.Element:
+    root = ET.fromstring(svg)
+    return next(
+        el for el in root.iter() if el.tag.endswith("text") and "".join(el.itertext()) == joined
+    )
+
+
+def test_multiline_title_exports_pdf_with_one_tspan_per_line() -> None:
+    """A multi-line title exports to PDF instead of raising on a ``<tspan>``
+    ``dy`` attribute (regression: ``ValueError: unsupported SVG feature:
+    <tspan> attribute 'dy'``).
+
+    The generator now emits one ``<tspan x y>`` per line — no ``dy`` — so the
+    PDF backend's whitelist accepts every line, and each line renders at its
+    own baseline (the parent ``y`` offset by ``index * line_step``) instead
+    of every line collapsing onto the page origin (``y=0``).
+    """
+    lines = ["First title line", "Second title line"]
+    fig = Figure(width=640, height=360, title="\n".join(lines))
+    fig.line([0.0, 1.0, 2.0], [0.0, 1.0, 0.0])
+    svg = fig.to_svg()
+
+    # The chrome block is one <text> with one <tspan> per line, each carrying
+    # an absolute <tspan y="..."> — never dy.
+    assert "dy=" not in svg
+    title = _title_root(svg, "".join(lines))
+    tspans = [el for el in title if el.tag.endswith("tspan")]
+    assert [el.text for el in tspans] == lines
+    assert all("y" in el.attrib for el in tspans)
+    svg_ys = [float(el.attrib["y"]) for el in tspans]
+    assert len(svg_ys) == 2 and svg_ys[1] > svg_ys[0]
+
+    pdf = svg_to_pdf(svg)
+    assert pdf.startswith(b"%PDF-1.")
+    assert b"/Type /Page" in pdf
+    content = _content(pdf)
+    # Both lines are present as distinct Tj glyph runs.
+    for line in lines:
+        assert f"({line}) Tj".encode("latin1") in content
+
+    title_runs = [
+        r for r in _text_runs(content) if any(li.encode("latin1") in r[2] for li in lines)
+    ]
+    assert len(title_runs) == 2
+    tys = sorted(r[1] for r in title_runs)
+    assert 0.0 not in tys  # the pre-fix failure mode stacked every line at y=0
+    assert tys[1] - tys[0] == pytest.approx(svg_ys[1] - svg_ys[0], abs=0.01)
+
+    # Determinism is preserved on the multi-line path.
+    assert svg_to_pdf(svg) == pdf
+
+
+def test_multiline_tick_labels_export_pdf() -> None:
+    """A multi-line tick label splits into PDF-consumable per-line tspans and
+    each line is a distinct Tj (exercises the tick-label ``_text_block_content``
+    caller, separate from titles and axis titles)."""
+    chart = xy.chart(
+        xy.line([0.0, 1.0], [0.0, 1.0]),
+        xy.x_axis(
+            tick_values=(0.0, 1.0),
+            tick_labels=("plain tick", "split\ntick"),
+            tick_label_strategy="preserve",
+        ),
+        width=360,
+        height=240,
+    )
+    svg = chart.figure().to_svg()
+    assert "dy=" not in svg
+    root = ET.fromstring(svg)
+    split = next(
+        el
+        for el in root.iter()
+        if el.tag.endswith("text") and "".join(el.itertext()) == "splittick"
+    )
+    tspans = [el for el in split if el.tag.endswith("tspan")]
+    assert [el.text for el in tspans] == ["split", "tick"]
+    assert all("y" in el.attrib for el in tspans)
+    assert float(tspans[1].attrib["y"]) > float(tspans[0].attrib["y"])
+
+    content = _content(svg_to_pdf(svg))
+    assert b"(plain tick) Tj" in content  # single-line tick stays one direct run
+    assert b"(split) Tj" in content
+    assert b"(tick) Tj" in content
+
+
+def test_pdf_tspan_inherits_parent_text_xy() -> None:
+    """A ``<tspan>`` that omits ``x``/``y`` inherits the parent ``<text>``'s
+    position (SVG semantics) instead of defaulting to ``0.0`` and stacking at
+    the page origin. The generator emits absolute coordinates today, so this
+    guards the subset against a future tspan that elides a coordinate.
+    """
+    ns = 'xmlns="http://www.w3.org/2000/svg"'
+    pdf = svg_to_pdf(
+        f'<svg {ns} width="100" height="50">'
+        '<text x="10" y="20" font-size="12"><tspan>inherited</tspan></text></svg>'
+    )
+    (run,) = [r for r in _text_runs(_content(pdf)) if b"inherited" in r[2]]
+    assert run[0] == pytest.approx(10.0, abs=0.01)
+    assert run[1] == pytest.approx(20.0, abs=0.01)
