@@ -6497,12 +6497,14 @@ export class ChartView {
     this._pickDirty = true;
   }
 
-  /** Pick-buffer extent: the backing store clamped to MAX_VIEWPORT_DIMS. */
+  /** Pick-buffer extent: the backing store clamped to MAX_VIEWPORT_DIMS and
+   * MAX_TEXTURE_SIZE. */
   _pickViewport(): [number, number] {
     const maxVp = this.gl.getParameter(this.gl.MAX_VIEWPORT_DIMS);
+    const maxTex = Number(this.gl.getParameter(this.gl.MAX_TEXTURE_SIZE));
     return [
-      Math.min(this.canvas.width, Number(maxVp[0])),
-      Math.min(this.canvas.height, Number(maxVp[1])),
+      Math.min(this.canvas.width, Number(maxVp[0]), maxTex),
+      Math.min(this.canvas.height, Number(maxVp[1]), maxTex),
     ];
   }
 
