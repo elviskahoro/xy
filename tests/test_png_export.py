@@ -1383,6 +1383,7 @@ def test_direct_rgba_colors_survive_continuous_size_channel():
         np.arange(5, dtype=float),
         color=colors,
         size=np.array([6.0, 8.0, 10.0, 12.0, 14.0]),
+        opacity=1.0,
     )
     img = _raster.render_raster(*fig.build_payload(), scale=1)
     px = img[..., :3].reshape(-1, 3)
