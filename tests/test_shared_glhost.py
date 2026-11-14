@@ -2204,4 +2204,4 @@ def test_shared_host_clamps_oversized_viewport_instead_of_throwing() -> None:
     assert "this._ensureCapacity(cw, ch)" in render
     assert "this._resetPass(null, cw, ch, true)" in render
     assert "this.canvas.height - ch" in render
-    assert "0, sourceY, cw, ch, 0, 0, cw, ch" in render
+    assert "0, sourceY, cw, ch, 0, 0, w, h" in render
