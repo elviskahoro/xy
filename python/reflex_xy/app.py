@@ -21,6 +21,7 @@ and runs the registry TTL sweep.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
 import inspect
 import warnings
@@ -179,6 +180,71 @@ def _iter_probed_figure_vars(state_cls: Any, seen: set[Any]):
         yield from _iter_probed_figure_vars(subclass, seen)
 
 
+class _ProbeLoopError(RuntimeError):
+    """Internal sentinel: the probe could not even *set up* the worker loop
+    for an opted-in async builder (e.g. ``asyncio.new_event_loop`` fails during
+    interpreter shutdown, or in a runtime that restricts loop creation).
+    Distinct from a builder failure so the surfaced
+    :class:`FigureProbeError` does not advise ``probe=False`` for a builder
+    the user explicitly opted into probing. Builder-raised exceptions
+    (including ``RuntimeError``) are *not* wrapped in this — they propagate
+    as ordinary builder failures."""
+
+
+def _run_in_fresh_loop(builder: Any, substate: Any) -> Any:
+    """Worker-thread body: create a private loop and drive the builder on it.
+
+    Loop *creation* failure is wrapped in :class:`_ProbeLoopError` so the
+    caller can surface it as a probe-infrastructure limitation rather than a
+    builder defect; anything raised from inside the coroutine (the builder
+    body) propagates unchanged as a builder failure.
+    """
+    try:
+        loop = asyncio.new_event_loop()
+    except RuntimeError as loop_exc:
+        raise _ProbeLoopError(str(loop_exc)) from loop_exc
+    try:
+        return loop.run_until_complete(builder(substate))
+    finally:
+        loop.close()
+
+
+def _run_async_builder(builder: Any, substate: Any) -> Any:
+    """Run an opted-in async figure builder to completion for the probe.
+
+    ``asyncio.run`` cannot be called from inside a running event loop, but
+    ``post_compile`` (and therefore this probe) can fire from inside one:
+    uvicorn invokes the Reflex ASGI factory (``App.__call__``) from within
+    its server coroutine, so ``reflex run``,
+    ``python -m uvicorn --factory`` (the Windows prod path), and any manual
+    ``uvicorn ... --factory`` deployment reach this code with a loop already
+    running.
+
+    Driving the builder on a fresh, separate loop in the *same* thread does
+    not work either: ``loop.run_until_complete(...)`` on a non-running loop
+    still raises ``RuntimeError: Cannot run the event loop while another
+    loop is running`` whenever another loop is running on this thread
+    (Python 3.10+, enforced in 3.13). So when a foreign loop is already
+    running we run the builder in a dedicated worker thread with its own
+    fresh loop — the main thread's loop is untouched and never asked to
+    schedule work the synchronous probe would then deadlock waiting on.
+    Builder-raised exceptions propagate through ``future.result()``
+    unchanged so the caller surfaces them as ordinary builder failures;
+    only loop *creation* failure is reclassified as a probe-infrastructure
+    limitation via :class:`_ProbeLoopError`.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(builder(substate))
+    # A foreign loop is running on this thread (uvicorn's server loop,
+    # typically). Run the builder in a worker thread so it gets its own
+    # event loop and we never block on a future scheduled on the foreign
+    # loop from the very thread that loop needs to keep running.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(_run_in_fresh_loop, builder, substate).result()
+
+
 def probe_figure_builders(root_cls: Any = None) -> list[str]:
     """Run every probe-enabled `@reflex_xy.figure` builder against default
     state (reflex-integration.md §3.1): the compile gate of the escape-hatch
@@ -211,7 +277,7 @@ def probe_figure_builders(root_cls: Any = None) -> list[str]:
             continue  # not reachable from this root (e.g. mixin scaffolding)
         try:
             if inspect.iscoroutinefunction(builder):
-                chart = asyncio.run(builder(substate))
+                chart = _run_async_builder(builder, substate)
             else:
                 chart = builder(substate)
             if chart is not None and not (
@@ -239,6 +305,28 @@ def probe_figure_builders(root_cls: Any = None) -> list[str]:
                     stacklevel=2,
                 )
                 continue
+            if isinstance(exc, _ProbeLoopError):
+                # Not a builder defect: the probe could not even *set up* the
+                # worker loop for this async builder (uvicorn invokes the
+                # ASGI factory — and therefore this plugin's `post_compile` —
+                # from inside its server loop, so the probe drives opted-in
+                # async builders in a worker thread; loop *creation* can fail
+                # during interpreter shutdown or in a runtime that restricts
+                # loop creation). Advising `probe=False` would tell the user
+                # to disable the feature they explicitly opted into; the fix
+                # is in the probe, not the builder.
+                msg = (
+                    f"@reflex_xy.figure probe could not run async builder "
+                    f"{full_name} ({location}) here: {exc!r}. The probe "
+                    "executes opted-in async builders on a fresh, private "
+                    "loop (uvicorn runs the ASGI factory — and therefore "
+                    "this probe — inside its server loop), but the worker "
+                    "loop could not be created. This is a probe "
+                    "infrastructure limitation, not a builder failure; the "
+                    "opt-in is correct, so do not opt out of the probe for "
+                    "this builder."
+                )
+                raise FigureProbeError(msg) from exc
             msg = (
                 f"@reflex_xy.figure probe failed for {full_name} ({location}): "
                 f"{type(exc).__name__}: {exc}. The builder ran against default "
