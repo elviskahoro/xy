@@ -21,9 +21,29 @@ from ._translate import MARKER_TO_SYMBOL, not_implemented
 _MAX_CONTOURS = 32
 _MAX_VERTICES = 64
 
+# Matplotlib's documented "no marker" spellings: ``"none"``, ``"None"``,
+# ``""`` and ``" "`` all mean "draw no markers".  Recognized here so the
+# strict marker grammar does not reject these first-class matplotlib values
+# (mirroring the ``LINESTYLE_TO_DASH`` ``"none"`` family in ``_translate``).
+_NO_MARKER_SPELLINGS = frozenset({"", "none"})
+
+
+def is_no_marker(marker: Any) -> bool:
+    """Whether ``marker`` is one of matplotlib's "draw no markers" sentinels.
+
+    Covers ``"none"``/``"None"``/``""``/``" "`` (case- and whitespace-insensitive,
+    matching matplotlib's ``MarkerStyle`` ``nothing`` marker) and excludes
+    ``None``, which call sites treat as "use the default marker".
+    """
+    return isinstance(marker, str) and marker.strip().lower() in _NO_MARKER_SPELLINGS
+
 
 def marker_render_spec(marker: Any) -> dict[str, Any]:
     """Return core scatter kwargs for one Matplotlib marker value."""
+    if is_no_marker(marker):
+        # Explicit "no marker": callers skip the marker scatter/endpoint entry
+        # when the spec carries no symbol, matching matplotlib's ``nothing``.
+        return {"symbol": None}
     try:
         symbol = MARKER_TO_SYMBOL.get(marker)
     except TypeError:

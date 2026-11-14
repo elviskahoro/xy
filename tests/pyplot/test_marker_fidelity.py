@@ -331,3 +331,103 @@ def test_axis_line_endpoint_markers_use_final_aspect_domain(
     actual = np.asarray(getattr(marker_trace, coordinate).values, dtype=float)
 
     np.testing.assert_allclose(actual, expected)
+
+
+# Matplotlib's documented "no marker" family — ``"none"``, ``"None"``, ``""``,
+# ``" "`` — means "draw no markers".  These were rejected by the strict marker
+# grammar with ``ValueError: unsupported marker: ...`` (commit 052da1a); the
+# cases below pin the recognition of the family and its distinction from
+# ``marker=None`` (which still means "use the default marker").
+_NO_MARKER_SPELLINGS = ("none", "None", "", " ")
+
+
+@pytest.mark.parametrize("spelling", _NO_MARKER_SPELLINGS)
+def test_marker_render_spec_recognizes_no_marker_family(spelling: str):
+    from xy.pyplot._markers import is_no_marker, marker_render_spec
+
+    assert is_no_marker(spelling)
+    # Case- and whitespace-insensitive, matching matplotlib's MarkerStyle nothing.
+    assert is_no_marker("  NoNe ")
+    assert marker_render_spec(spelling) == {"symbol": None}
+
+
+def test_marker_render_spec_keeps_real_markers_and_no_marker_sentinel_distinct():
+    from xy.pyplot._markers import is_no_marker, marker_render_spec
+
+    # ``None`` is "use the default marker", NOT a no-marker sentinel — it must
+    # stay outside the nothing family so scatter() still defaults to a circle
+    # and plot() still omits the overlay.
+    assert is_no_marker(None) is False
+    assert is_no_marker("o") is False
+    assert is_no_marker((5, 0)) is False
+    assert marker_render_spec("o") == {"symbol": "circle"}
+
+
+def test_plot_with_no_marker_family_draws_line_without_marker_overlay():
+    _, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1], marker="none")
+
+    payload, _blob = ax._build_chart(640, 480).figure().build_payload()
+    kinds = [trace["kind"] for trace in payload["traces"]]
+    assert "line" in kinds
+    assert "scatter" not in kinds
+
+
+def test_plot_with_explicit_marker_still_overlays_scatter():
+    _, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1], marker="o")
+
+    payload, _blob = ax._build_chart(640, 480).figure().build_payload()
+    assert [trace["kind"] for trace in payload["traces"]] == ["line", "scatter"]
+
+
+def test_scatter_with_no_marker_family_emits_no_scatter_trace():
+    _, ax = plt.subplots()
+    collection = ax.scatter([0, 1], [0, 1], marker="none", label="nothing")
+
+    payload, _blob = ax._build_chart(640, 480).figure().build_payload()
+    assert [trace for trace in payload["traces"] if trace["kind"] == "scatter"] == []
+    # The handle remains usable for the public Collection API.
+    np.testing.assert_array_equal(
+        np.asarray(collection.get_offsets()), np.asarray([[0, 0], [1, 1]])
+    )
+    assert collection.get_label() == "nothing"
+
+
+def test_scatter_with_no_marker_still_draws_default_circle():
+    _, ax = plt.subplots()
+    ax.scatter([0, 1], [0, 1], marker=None)
+
+    payload, _blob = ax._build_chart(640, 480).figure().build_payload()
+    assert [trace for trace in payload["traces"] if trace["kind"] == "scatter"]
+
+
+def test_errorbar_with_no_marker_family_skips_marker_overlay():
+    _, ax = plt.subplots()
+    ax.errorbar([0, 1], [0, 1], yerr=0.1, marker="none")
+
+    payload, _blob = ax._build_chart(640, 480).figure().build_payload()
+    kinds = [trace["kind"] for trace in payload["traces"]]
+    assert "errorbar" in kinds
+    assert "scatter" not in kinds
+
+
+@pytest.mark.parametrize("method", ("axhline", "axvline"))
+def test_axis_lines_with_no_marker_family_skip_endpoint_markers(method: str):
+    _, ax = plt.subplots()
+    if method == "axhline":
+        ax.axhline(0.5, marker="none")
+    else:
+        ax.axvline(0.5, marker="none")
+
+    payload, _blob = ax._build_chart(640, 480).figure().build_payload()
+    assert [trace for trace in payload["traces"] if trace["kind"] == "scatter"] == []
+
+
+def test_unknown_marker_string_still_raises_loudly():
+    # The strict grammar still rejects genuinely unknown strings — the nothing
+    # family is an accepted exception, not a relaxation of validation.
+    from xy.pyplot._markers import marker_render_spec
+
+    with pytest.raises(ValueError, match="unsupported marker"):
+        marker_render_spec("definitely-not-a-matplotlib-marker")
