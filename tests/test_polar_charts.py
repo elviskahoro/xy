@@ -818,6 +818,169 @@ def test_full_turn_slice_draws_an_annulus_not_nothing() -> None:
         assert int(window.min()) < 200, f"raster annulus missing at {degrees} degrees"
 
 
+def _arc_center(
+    x1: float, y1: float, x2: float, y2: float, r: float, large: int, sweep: int
+) -> tuple[float, float]:
+    """SVG appendix-F.6.5 endpoint-to-center conversion (phi = 0, rx == ry).
+
+    The two endpoint solutions of the `A` arc resolve to a unique circle
+    center once `large` and `sweep` are fixed. A correct wedge's rim arc
+    resolves to the polar center; the wrong-flag candidate resolves to the
+    circle mirrored across the chord — several px off the polar center for a
+    near-semicircle slice.
+    """
+    x1p, y1p = (x1 - x2) / 2.0, (y1 - y2) / 2.0
+    cxp, cyp = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    den = r * r * (x1p * x1p + y1p * y1p)
+    lam = max(0.0, (r**4 - r * r * (x1p * x1p + y1p * y1p)) / den) if den else 0.0
+    factor = math.sqrt(lam)
+    if large == sweep:
+        factor = -factor
+    return cxp + factor * y1p, cyp - factor * x1p
+
+
+def test_slightly_more_than_half_slice_arc_flag_uses_insetted_span() -> None:
+    """The SVG `large` arc flag was derived from the RAW wedge span while the
+    arc connects the gap-insetted endpoints, whose separation is smaller. For a
+    raw span just over 180° the insetted separation drops below 180°, so
+    `large=1` resolved the arc to the circle mirrored across the chord — the
+    rim poked past the chart rim by several px and disagreed with the raster
+    and client renderers. The flag must follow the span the arc actually
+    draws."""
+    # 50.1% -> 180.36° raw; default pad=4 -> wedge_gap=4. At R=145 the trigger
+    # window is (180°, 181.58°), so the insetted outer span is 178.78° < 180°.
+    chart = xy.pie_chart(
+        ["a", "b"], [50.1, 49.9], hole=0.0, corner_radius=0.0, width=420, height=420
+    )
+    fig = chart.figure()
+    doc = fig.to_image(format="svg").decode()
+    wedges = [d for d in re.findall(r'<path d="([^"]+)"', doc) if " A " in d]
+    # The big slice is the arc path that is NOT the centre fan (it starts with
+    # an M to the polar centre); pick the one whose arc endpoints are widest.
+    big = max(
+        wedges,
+        key=lambda d: (
+            math.hypot(
+                *(
+                    float(v)
+                    for v in re.search(
+                        r"A ([\d.]+) [\d.]+ 0 \d \d ([\-\d.]+) ([\-\d.]+)", d
+                    ).groups()[1:]
+                )
+            )
+            - math.hypot(*(float(v) for v in re.search(r"L ([\-\d.]+) ([\-\d.]+)", d).groups()))
+        ),
+    )
+    m = re.search(
+        r"L ([\-\d.]+) ([\-\d.]+) A ([\d.]+) [\d.]+ 0 (\d+) (\d+) ([\-\d.]+) ([\-\d.]+)", big
+    )
+    assert m is not None
+    ax, ay = float(m.group(1)), float(m.group(2))
+    r = float(m.group(3))
+    large = int(m.group(4))
+    sweep = int(m.group(5))
+    ex, ey = float(m.group(6)), float(m.group(7))
+
+    spec, _ = fig.build_payload_split()
+    _w, _h, _c, plot = layout(spec)
+    project = _PolarProjection(spec["x_axis"], spec["y_axis"], plot)
+
+    # Insetted endpoint separation is below 180°, so the rim is the SHORT arc.
+    assert large == 0, "insetted span < 180° must select the short (large=0) arc"
+
+    # The resolved circle center must be the polar center (the rim is drawn on
+    # the true polar circle, not its chord-mirror). _num rounds to 2 decimals,
+    # which leaves a small residual — but it is far smaller than the several-px
+    # wrong-circle deviation this flag fix removes.
+    cx, cy = _arc_center(ax, ay, ex, ey, r, large, sweep)
+    dist = math.hypot(cx - project.cx, cy - project.cy)
+    assert dist < 1.0, f"outer rim resolved to the mirrored circle: {dist:.3f}px off polar center"
+
+
+def test_per_arc_large_flags_diverge_for_outer_and_inner_rims() -> None:
+    """The inner radius pays a bigger angular inset for the same pixel gap
+    (`gap / (2r)`), so the inner arc's separation can drop below 180° while the
+    outer arc's is still above it. A single raw-span-derived `large` flag
+    cannot describe both arcs at once — each arc needs its own flag."""
+    # 50.666% -> 182.4° raw. With pad=4, hole=0.5 (inner R=72.5):
+    #   outer insetted span = 182.4° - 2·degrees(2/145) = 180.82° > 180° -> large=1
+    #   inner insetted span = 182.4° - 2·degrees(2/72.5) = 179.24° < 180° -> large=0
+    chart = xy.pie_chart(
+        ["a", "b"], [50.666, 49.334], hole=0.5, corner_radius=0.0, width=420, height=420
+    )
+    fig = chart.figure()
+    doc = fig.to_image(format="svg").decode()
+    wedges = [d for d in re.findall(r'<path d="([^"]+)"', doc) if " A " in d]
+    assert wedges, "expected at least one annular wedge path"
+
+    spec, _ = fig.build_payload_split()
+    _w, _h, _c, plot = layout(spec)
+    project = _PolarProjection(spec["x_axis"], spec["y_axis"], plot)
+    outer_r = project.radius
+    inner_r = outer_r * 0.5
+
+    # The big slice is the annulus path with the widest arc — its outer arc
+    # subtends the largest angle. Identify it by the largest outer-arc radius
+    # * chord length product among annulus paths.
+    def outer_arc(d: str):
+        m = re.search(
+            r"M ([\-\d.]+) ([\-\d.]+) A ([\d.]+) [\d.]+ 0 (\d+) (\d+) ([\-\d.]+) ([\-\d.]+)", d
+        )
+        if not m:
+            return None
+        return (
+            float(m.group(1)),
+            float(m.group(2)),
+            float(m.group(3)),
+            int(m.group(4)),
+            int(m.group(5)),
+            float(m.group(6)),
+            float(m.group(7)),
+        )
+
+    candidates = [(d, outer_arc(d)) for d in wedges]
+    candidates = [(d, a) for d, a in candidates if a is not None]
+    big, big_arc = max(
+        candidates,
+        key=lambda da: math.hypot(da[1][0] - da[1][5], da[1][1] - da[1][6]),
+    )
+
+    ox0, oy0, or_r, large_out, _sweep, ox1, oy1 = big_arc
+    mi = re.search(
+        r"L ([\-\d.]+) ([\-\d.]+) A ([\d.]+) [\d.]+ 0 (\d+) (\d+) ([\-\d.]+) ([\-\d.]+)", big
+    )
+    assert mi is not None, "expected an inner (return) arc"
+    ix1, iy1 = float(mi.group(1)), float(mi.group(2))
+    ir_r = float(mi.group(3))
+    large_in = int(mi.group(4))
+
+    assert or_r == pytest.approx(outer_r, abs=1.0)
+    assert ir_r == pytest.approx(inner_r, abs=1.0)
+    # The two arcs of the SAME slice must carry different large flags: the
+    # outer rim is the long arc, the inner rim (larger angular gap) is the short.
+    assert large_out == 1, "outer insetted span > 180° -> large=1"
+    assert large_in == 0, "inner insetted span < 180° -> large=0"
+
+    ocx, ocy = _arc_center(ox0, oy0, ox1, oy1, or_r, large_out, int(_sweep))
+    icx, icy = _arc_center(
+        ix1, iy1, float(mi.group(6)), float(mi.group(7)), ir_r, large_in, int(mi.group(5))
+    )
+    assert math.hypot(ocx - project.cx, ocy - project.cy) < 1.0, "outer rim off the polar circle"
+    assert math.hypot(icx - project.cx, icy - project.cy) < 1.0, "inner rim off the polar circle"
+
+    # The raster twin draws the same wedges around the true polar center, so
+    # the ring midpoints carry ink at the projected annulus radius.
+    from test_png_export import _decode_rgba
+
+    pixels = _decode_rgba(fig.to_image(format="png", scale=1))
+    span_rad = math.radians(182.4)
+    mid_angle = span_rad / 2.0  # slice starts at angle 0
+    mid_r = (outer_r + inner_r) / 2.0
+    px, py = project.cx + mid_r * math.cos(mid_angle), project.cy - mid_r * math.sin(mid_angle)
+    window = pixels[int(py) - 2 : int(py) + 3, int(px) - 2 : int(px) + 3, 1]
+    assert int(window.min()) < 200, "raster annulus missing at the slice midpoint"
+
+
 def test_fractional_degree_ticks_keep_their_precision() -> None:
     """`_fmt_angle` used a hardcoded step of 1, so an authored 22.5-degree grid
     labelled itself 22°/68° (round-half-even) instead of 22.5°/67.5°."""
