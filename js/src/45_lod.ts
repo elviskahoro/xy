@@ -759,6 +759,12 @@ export function lodDropPointCache(view, g) {
 // grid stays as the stale-while-revalidate frame until the masked reply
 // replaces it (§17). The home sample overlay survives — it is the
 // standalone re-bin worker's CPU source and is filtered separately.
+//
+// Keep the LIVE grid in the rebuilt cache (not an empty array): the
+// sample selector `lodSampleForView` reads `g.densityCache || fallback`,
+// and an empty array is truthy — so a bare `[]` would defeat the fallback
+// that reaches the surviving home overlay at `g.density.overlay`, leaving
+// the standalone (kernel-less) client with no points tier after a toggle.
 export function lodDropDensityCache(view, g) {
   for (const old of g.densityCache || []) {
     if (!old || old === g.density) continue;
