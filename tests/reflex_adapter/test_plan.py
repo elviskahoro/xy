@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+import textwrap
+import types
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -11,10 +18,50 @@ from reflex_xy.plan import (
     PlanBindError,
     PlanError,
     PlanMissError,
+    _code_fingerprint,
     build_plan,
     plan_of,
     require_plan,
 )
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_PYTHON_DIR = str(_REPO_ROOT / "python")
+
+
+def _run_child(code: str, *, hash_seed):
+    """Run ``code`` in a fresh interpreter with a controlled PYTHONHASHSEED.
+
+    ``hash_seed=None`` leaves the seed unset (a random per-process value),
+    which is the strongest cross-process determinism check: a canonicalized
+    fingerprint must be identical even when the OS hands each child a
+    different seed.
+    """
+    env = os.environ.copy()
+    if hash_seed is None:
+        env.pop("PYTHONHASHSEED", None)
+    else:
+        env["PYTHONHASHSEED"] = str(hash_seed)
+    env["PYTHONPATH"] = _PYTHON_DIR + os.pathsep + env.get("PYTHONPATH", "")
+    proc = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(code)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return proc.stdout.strip()
+
+
+def _fingerprint_in_child(src: str, *, hash_seed):
+    code = (
+        "import sys\n"
+        f"sys.path.insert(0, {_PYTHON_DIR!r})\n"
+        "ns = {}\n"
+        f"exec({src!r}, ns)\n"
+        "from reflex_xy.plan import _code_fingerprint\n"
+        "sys.stdout.write(_code_fingerprint(ns['fn']))\n"
+    )
+    return _run_child(code, hash_seed=hash_seed)
 
 
 def scatter_plan(**mark_options):
@@ -338,3 +385,145 @@ def test_registry_lookup_and_miss():
     assert plan_of("feedfacefeedfacefeed") is None
     with pytest.raises(PlanMissError, match="feedfacefeedfacefeed"):
         require_plan("feedfacefeedfacefeed")
+
+
+# Cross-process determinism of the content address.
+#
+# `_code_fingerprint`'s docstring promises a fingerprint "deterministic across
+# processes for one interpreter version": every backend worker that re-runs a
+# page's `component()` derives the same plan digest and registers it under
+# that digest in its process-local `_PLANS` map (X4). `repr(set(...))` /
+# `repr(frozenset(...))` iterate in per-process hash order (PYTHONHASHSEED), so
+# any default — or bytecode constant — bearing a set/frozenset used to make
+# the fingerprint, and therefore the digest, differ per worker. The frontend
+# compile worker then baked digest A into the page while backend workers
+# registered the plan under digest B, and the client's resync retries against
+# the same dead digest left the chart permanently blank. These tests pin the
+# fix by running the real repo function in child interpreters with explicit
+# *and* random hash seeds.
+
+# Explicit seeds plus two unset (random) runs: canonicalization must make the
+# per-process hash order irrelevant, so all five outputs coincide.
+_HASH_SEEDS = [0, 1, 2, None, None]
+
+_SET_BEARING_DEFAULTS = {
+    "frozenset_default": (
+        "def fn(v, allowed=frozenset({'OPEN', 'SHIPPED', 'PENDING'})):\n    return v\n"
+    ),
+    "set_kwdefault": "def fn(*, v, allowed={'x', 'y', 'z'}):\n    return v\n",
+    "tuple_of_frozenset": ("def fn(v, opts=(frozenset({'a', 'b', 'c'}), 5)):\n    return v\n"),
+    "dict_of_frozenset": ("def fn(v, opts={'k': frozenset({'p', 'q'}), 'n': 7}):\n    return v\n"),
+    "nested_tuple_of_sets": (
+        "def fn(v, opts=({'k': frozenset({'a', 'b'}), 'set': {1, 2, 3}},)):\n    return v\n"
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "src", list(_SET_BEARING_DEFAULTS.values()), ids=list(_SET_BEARING_DEFAULTS)
+)
+def test_code_fingerprint_is_cross_process_stable_for_set_defaults(src):
+    """The X4 contract: one callable, one fingerprint in every worker,
+    independent of PYTHONHASHSEED — for set/frozenset defaults and defaults
+    nesting them in tuples/dicts. The in-process value must agree too, so the
+    children are not silently converging on a wrong constant."""
+    local: dict = {}
+    exec(src, local)
+    in_process = _code_fingerprint(local["fn"])
+    across_seeds = {_fingerprint_in_child(src, hash_seed=seed) for seed in _HASH_SEEDS}
+    assert across_seeds == {in_process}, (
+        f"fingerprint diverged across hash seeds or from in-process: "
+        f"{across_seeds!r} vs in-process {in_process!r}"
+    )
+
+
+def test_code_fingerprint_canonicalizes_container_constants():
+    """The same hazard lives in bytecode constants: CPython folds a constant
+    frozenset literal into ``co_consts``, and its repr is per-process hash
+    ordered. The fingerprint must canonicalize it (the pre-refactor dedicated
+    frozenset branch is now unified with the defaults path through
+    ``_canonical_bytes``)."""
+    src = "def fn(v):\n    return frozenset({'a', 'b', 'c'})\n"
+    local: dict = {}
+    exec(src, local)
+    in_process = _code_fingerprint(local["fn"])
+    across_seeds = {_fingerprint_in_child(src, hash_seed=seed) for seed in _HASH_SEEDS}
+    assert across_seeds == {in_process}
+
+
+def test_code_fingerprint_stays_sensitive_to_set_contents():
+    """Canonicalization removes per-process hash order, not content: a
+    different set/frozenset default must still change the fingerprint, or the
+    address would no longer track behavior (a rolling deployment could swap
+    reducers behind one digest)."""
+    variants = {
+        "OPEN_SHIPPED": "def fn(v, allowed=frozenset({'OPEN', 'SHIPPED'})):\n    return v\n",
+        "OPEN_CANCELLED": "def fn(v, allowed=frozenset({'OPEN', 'CANCELLED'})):\n    return v\n",
+        "extra_element": "def fn(v, allowed=frozenset({'OPEN', 'SHIPPED', 'EXTRA'})):\n    return v\n",
+    }
+    fingerprints = {_fingerprint_in_child(src, hash_seed=0) for src in variants.values()}
+    assert len(fingerprints) == len(variants)
+
+
+_REDUCER_SRC = (
+    "def reducer(values, modes=frozenset({'mean', 'robust'})):\n"
+    "    if not len(values):\n"
+    "        return 0.0\n"
+    "    if 'mean' in modes:\n"
+    "        return float(np.mean(values))\n"
+    "    return float(np.median(values))\n"
+)
+
+
+def _plan_digest_in_child(reducer_src: str, *, hash_seed) -> str:
+    code = (
+        "import sys, types\n"
+        f"sys.path.insert(0, {_PYTHON_DIR!r})\n"
+        "import numpy as np\n"
+        "import xy\n"
+        "from reflex_xy.plan import build_plan\n"
+        "mod = types.ModuleType('setbearing_reducers')\n"
+        "mod.__name__ = 'setbearing_reducers'\n"
+        "sys.modules['setbearing_reducers'] = mod\n"
+        f"exec({reducer_src!r}, mod.__dict__)\n"
+        "reducer = mod.__dict__['reducer']\n"
+        "plan = build_plan('hexbin_chart', "
+        "(xy.hexbin('a', 'b', C='w', reduce_C_function=reducer),), {})\n"
+        "sys.stdout.write(plan.digest)\n"
+    )
+    return _run_child(code, hash_seed=hash_seed)
+
+
+def test_plan_digest_is_stable_across_workers_for_set_bearing_reducer():
+    """The end-to-end failure mode: a hexbin chart whose pure-Python reducer
+    has a set/frozenset default must reach the *same* plan digest in every
+    worker. The frontend compile worker embeds the digest in the page;
+    backend-only workers register the plan under it at startup. Before the
+    fix, distinct ``PYTHONHASHSEED`` values produced distinct digests, the
+    subscription missed ``_PLANS`` in every worker that didn't compile the
+    page, and the client burned its resync budget retrying the dead digest —
+    a permanently blank chart with only a console warning.
+
+    Two assertions pin the contract: every child worker derives one digest,
+    and the in-process digest (the one the frontend compile worker bakes) is
+    in that set (frontend ``A`` == backend ``B``)."""
+    mod = types.ModuleType("setbearing_reducers")
+    mod.__name__ = "setbearing_reducers"
+    mod.__dict__["np"] = np
+    sys.modules["setbearing_reducers"] = mod
+    try:
+        exec(_REDUCER_SRC, mod.__dict__)
+        plan = build_plan(
+            "hexbin_chart",
+            (xy.hexbin("a", "b", C="w", reduce_C_function=mod.__dict__["reducer"]),),
+            {},
+        )
+        across_seeds = {_plan_digest_in_child(_REDUCER_SRC, hash_seed=seed) for seed in _HASH_SEEDS}
+        assert len(across_seeds) == 1, f"plan digest varied across workers: {across_seeds!r}"
+        assert plan.digest in across_seeds, (
+            f"in-process digest {plan.digest!r} (the one the frontend compile "
+            f"worker bakes) is not the digest backend workers register under "
+            f"({across_seeds!r})"
+        )
+    finally:
+        sys.modules.pop("setbearing_reducers", None)
