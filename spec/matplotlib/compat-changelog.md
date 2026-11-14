@@ -539,5 +539,9 @@ colorbar domains) fully cleared.
   Matplotlib's 1-based ordinals, and `manage_ticks=True` reserves a half unit
   around the outer positions regardless of the drawn box width.
 
+- `Line2D` handles from `plot(..., marker=...)` now own their marker overlay:
+  `remove()`, `set_visible()`, `set_alpha()`, `set_color()` and `set_zorder()`
+  move the line and its markers together instead of leaving orphaned markers.
+
 Future entries must identify the Matplotlib release/revision, inventory
 additions or removals, and any compatibility-level changes.

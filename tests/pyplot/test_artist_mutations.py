@@ -143,3 +143,46 @@ def test_axes_image_set_data_xyz_recomputes_cached_extent() -> None:
     y[:] = -99
     np.testing.assert_array_equal(image._entry["kwargs"]["x"], [10.0, 20.0, 40.0])
     np.testing.assert_array_equal(image._entry["kwargs"]["y"], [-2.0, 2.0])
+
+
+def _marked_line():
+    import xy.pyplot as plt
+
+    _, ax = plt.subplots()
+    (line,) = ax.plot([0, 1, 2], [0, 1, 2], marker="o")
+    return ax, line
+
+
+def test_removing_a_markered_line_removes_its_markers():
+    ax, line = _marked_line()
+    line.remove()
+    assert ax._entries == []
+
+
+def test_hiding_and_fading_a_markered_line_reach_its_markers():
+    ax, line = _marked_line()
+    line.set_alpha(0.5)
+    assert [e["kwargs"]["opacity"] for e in ax._entries] == [0.5, 0.5]
+    line.set_visible(False)
+    assert [e["kwargs"]["opacity"] for e in ax._entries] == [0.0, 0.0]
+
+
+def test_markerless_line_lifecycle_leaves_adjacent_scatter_alone():
+    import xy.pyplot as plt
+
+    _, ax = plt.subplots()
+    (line,) = ax.plot([0, 1], [0, 1])
+    ax.scatter([0, 1], [1, 0])
+    line.set_alpha(0.5)
+    assert ax._entries[1]["kwargs"].get("opacity", 1.0) == 1.0
+    line.remove()
+    assert len(ax._entries) == 1
+
+
+def test_zorder_on_a_markered_line_keeps_markers_attached():
+    ax, line = _marked_line()
+    line.set_zorder(5)
+    assert [e["_zorder"] for e in ax._entries] == [5.0, 5.0]
+    assert [e["kind"] for e in ax._entries] == ["line", "scatter"]
+    line.remove()
+    assert ax._entries == []
