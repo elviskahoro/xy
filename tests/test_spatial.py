@@ -1,8 +1,7 @@
 """SpatialIndex reader (Tier-3 out-of-core windowed query, dossier §28/§32b).
 
 Builds a tiny index by hand (no Rust dependency) and pins the query contract:
-per-cell grouping, window counting, windowed gather, and exact windowed density
-equal to a direct bin over the in-window points.
+per-cell grouping and window counting.
 """
 
 from __future__ import annotations
@@ -12,7 +11,6 @@ import struct
 import numpy as np
 
 import xy
-from xy import kernels
 from xy._spatial import SpatialIndex
 
 _MAGIC = b"XYSPIDX1"
@@ -58,7 +56,7 @@ def test_load_and_cell_grouping(tmp_path):
             assert int(idx.lon[k]) == cx and int(idx.lat[k]) == cy
 
 
-def test_window_count_and_gather(tmp_path):
+def test_window_count(tmp_path):
     g, extent = 8, (0.0, 8.0, 0.0, 8.0)
     # 3 points per cell → predictable counts.
     xs, ys = np.meshgrid(np.arange(8) + 0.5, np.arange(8) + 0.5)
@@ -67,26 +65,6 @@ def test_window_count_and_gather(tmp_path):
     idx = SpatialIndex.load(_write_index(tmp_path, g, extent, lon, lat))
     # Window covering cells x in {2,3}, y in {5,6} → 4 cells × 3 pts = 12.
     assert idx.window_count(2.1, 3.9, 5.1, 6.9) == 12
-    gl, gt = idx.gather(2.1, 3.9, 5.1, 6.9)
-    assert len(gl) == 12
-    assert set(gl.astype(int)) <= {2, 3}  # cell centers 2.5, 3.5 → trunc 2, 3
-    assert set(gt.astype(int)) <= {5, 6}
-
-
-def test_density_grid_matches_direct_bin(tmp_path):
-    g, extent = 32, (-10.0, 10.0, -10.0, 10.0)
-    rng = np.random.default_rng(1)
-    n = 200_000
-    lon = np.clip(rng.normal(0, 3, n), -10, 9.999)
-    lat = np.clip(rng.normal(0, 3, n), -10, 9.999)
-    idx = SpatialIndex.load(_write_index(tmp_path, g, extent, lon, lat))
-    wx0, wx1, wy0, wy1, w, h = -4.0, 4.0, -3.0, 3.0, 100, 80
-    grid = idx.density_grid(wx0, wx1, wy0, wy1, w, h)
-    # Oracle: bin the in-window points directly (f32 to match the index dtype).
-    gl, gt = idx.gather(wx0, wx1, wy0, wy1)
-    oracle = kernels.bin_2d(gl, gt, wx0, wx1, wy0, wy1, w, h)
-    assert np.array_equal(grid, oracle)
-    assert grid.sum() > 0
 
 
 def test_density_view_drills_to_crisp_points_then_grids(tmp_path):

@@ -20,8 +20,6 @@ from dataclasses import dataclass
 import numpy as np
 import numpy.typing as npt
 
-from . import kernels
-
 _MAGIC = b"XYSPIDX1"
 _HEADER = 56  # magic(8) + g(4) + pad(4) + x0x1y0y1(32) + n(8)
 
@@ -70,38 +68,13 @@ class SpatialIndex:
         rows = self.offsets[(np.arange(iy0, iy1 + 1) * g)[:, None] + np.array([ix0, ix1 + 1])]
         return int((rows[:, 1] - rows[:, 0]).sum())
 
-    def gather(
-        self, x0: float, x1: float, y0: float, y1: float
-    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-        """The (lon, lat) of every point in the window's cells, as f64 for the
-        f64 binning kernels. One contiguous memmap slice per grid row; only
-        these cells are paged in. `density_grid` uses the f32 path directly and
-        avoids this widening; this stays for callers that need f64."""
-        lon, lat = self._gather_f32(x0, x1, y0, y1)
-        return lon.astype(np.float64), lat.astype(np.float64)
-
-    def density_grid(
-        self, x0: float, x1: float, y0: float, y1: float, w: int, h: int
-    ) -> npt.NDArray[np.float32]:
-        """Exact density grid for the window at screen resolution, binned from
-        only the in-window points (the cell overhang outside the window is
-        discarded by `bin_2d`'s half-open range test).
-
-        The sorted columns are f32, so bin them **directly** with the f32 kernel
-        rather than gathering to f64 first: the f32→f64 widening copy of every
-        in-window point otherwise dominates the query (~half the wall-clock on a
-        30M-point window). One contiguous memmap slice per grid row is
-        concatenated (no dtype change) and binned in a single parallel pass;
-        the result is identical to `bin_2d` over the same points as f64."""
-        lon, lat = self._gather_f32(x0, x1, y0, y1)
-        return kernels.bin_2d_f32(lon, lat, x0, x1, y0, y1, w, h)
-
     def _gather_f32(
         self, x0: float, x1: float, y0: float, y1: float
     ) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]:
         """Window points as **f32** (the on-disk dtype) — one contiguous memmap
-        slice per grid row, concatenated with no widening. Backs `density_grid`;
-        `gather` is the f64 view kept for callers that need f64 math."""
+        slice per grid row, concatenated with no widening. The production
+        deep-zoom path bins these directly with the f32 kernel (no f32→f64
+        widening copy, which would otherwise dominate the query)."""
         ix0, ix1 = self._cell_range(x0, x1, self.x0, self.x1)
         iy0, iy1 = self._cell_range(y0, y1, self.y0, self.y1)
         g = self.g
