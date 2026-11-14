@@ -223,8 +223,9 @@ class Artist:
         for companion in self._companion_entries():
             if companion is not self._entry:
                 move(companion)
+        companions = self._companion_entries()
         for marker_entry in self._marker_entries():
-            if marker_entry is not self._entry:
+            if marker_entry is not self._entry and not any(marker_entry is c for c in companions):
                 marker_entry["x"], marker_entry["y"] = convert(marker_entry["x"], marker_entry["y"])
         self._transform = transform
         self._touch()
@@ -320,6 +321,26 @@ class Artist:
 
 class Line2D(Artist):
     """Handle for plt.plot lines (and their marker overlays)."""
+
+    def _companion_entries(self) -> list[dict[str, Any]]:
+        # The marker overlay is part of this Line2D: visibility, alpha, color,
+        # zorder and removal must reach it too.
+        # Only an overlay stamped by ``plot`` is owned; an adjacent scatter
+        # the user drew separately is not.
+        return [
+            e for e in self._marker_entries() if e is not self._entry and e.get("_legend_skip")
+        ]
+
+    def set_zorder(self, level: float) -> None:
+        for entry in self._companion_entries():
+            entry["_zorder"] = float(level)
+        super().set_zorder(level)
+
+    def remove(self) -> None:
+        # Overlays are located by adjacency, so drop them before the line.
+        for entry in self._companion_entries():
+            self._axes._remove_entry(entry)
+        super().remove()
 
     @staticmethod
     def _segment_args_from_xy(x: Any, y: Any) -> tuple[Any, Any, Any, Any]:
