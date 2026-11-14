@@ -430,6 +430,21 @@ def _point_shipped_sel(t: Any) -> Optional[np.ndarray]:
     """
     if t.shipped_sel is not None:
         return t.shipped_sel
+    if t.kind in ("line", "area", "error_band"):
+        # Before the first build only the viewport-free direct-tier mapping can
+        # be derived: the NaN/inf drop (§19). Log-axis visibility is applied by
+        # build_payload, which always precedes widget hover.
+        base = t.base
+        if not (
+            t.x.zone.null_count
+            or t.y.zone.null_count
+            or (base is not None and base.zone.null_count)
+        ):
+            return None
+        ok = np.isfinite(t.x.values) & np.isfinite(t.y.values)
+        if base is not None:
+            ok &= np.isfinite(base.values)
+        return np.flatnonzero(ok).astype(np.uint32)
     if t.kind != "scatter":
         return None
     if t.use_density() and not t.drill_mode:

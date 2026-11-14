@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 
-from . import _native, _validate, channels, interaction, kernels, lod
+from . import _validate, channels, interaction, kernels, lod
 from ._trace import Trace
 from .columns import Column
 from .config import (
@@ -588,10 +588,11 @@ class PayloadMixin(_Host):
 
     def _m4_decimate(
         self, t: Trace, xr: tuple, px_width: int, *arrays: np.ndarray
-    ) -> tuple[str, tuple[np.ndarray, ...]]:
+    ) -> tuple[str, tuple[np.ndarray, ...], np.ndarray | None]:
         """M4-decimate the parallel `arrays` (x first) when the trace is over
         the threshold; M4 already excludes non-finite within the window (§19).
-        Returns `(tier, arrays)` — shared by the line and area emitters.
+        Returns `(tier, arrays, rows)` where `rows` are the canonical rows the
+        decimated vertices came from (None on the direct tier) — shared by the line and area emitters.
 
         On a nonlinear x axis the buckets are laid out in scale coordinates so
         each bucket covers a uniform strip of *screen*, not of raw data (§28);
@@ -603,27 +604,23 @@ class PayloadMixin(_Host):
             # a multi-turn series is not monotonic at all, so the buckets carry
             # no screen meaning. Ship direct until polar-aware decimation
             # exists (spec/design/polar-axes.md §7).
-            return "direct", arrays
+            return "direct", arrays, None
         if t.n_points <= DECIMATION_THRESHOLD:
-            return "direct", arrays
+            return "direct", arrays, None
         eps = float(np.finfo(np.float64).eps)
         mx, (m0, m1) = self._binning_coords(t.x_axis, arrays[0], xr)
         if mx is not arrays[0]:
             idx = kernels.m4_indices(mx, arrays[1], m0, m1 + eps, px_width)
-            return "decimated", tuple(a[idx] for a in arrays)
-        if len(arrays) == 2:
-            selected = _native.m4_points(arrays[0], arrays[1], xr[0], xr[1] + eps, px_width)
-            return "decimated", selected
+            return "decimated", tuple(a[idx] for a in arrays), idx
+        # Indices (not points) so the shipped→canonical map can be recorded
+        # for pick/selection (§17).
         idx = kernels.m4_indices(arrays[0], arrays[1], xr[0], xr[1] + eps, px_width)
-        if len(idx):
-            return "decimated", tuple(a[idx] for a in arrays)
-        return "decimated", tuple(a[:0] for a in arrays)
+        return "decimated", tuple(a[idx] for a in arrays), idx
 
     def _emit_line(
         self, t: Trace, pw: "_PayloadWriter", xr: tuple, yr: tuple, px_width: int
     ) -> dict[str, Any]:
-        tier, (xv, yv) = self._m4_decimate(t, xr, px_width, t.x.values, t.y.values)
-        sel = None
+        tier, (xv, yv), sel = self._m4_decimate(t, xr, px_width, t.x.values, t.y.values)
         if tier == "direct":
             sel = self._finite_sel(t, xv, yv)
             if sel is not None:
@@ -633,6 +630,10 @@ class PayloadMixin(_Host):
             if not bool(np.all(finite)):
                 sel = np.flatnonzero(finite) if sel is None else sel[finite]
                 xv, yv = xv[finite], yv[finite]
+        # Pick map (§17): home-buffer vertex -> canonical row. Zoom refinements
+        # (`decimate_view`) intentionally do not update it: the client's hover
+        # indexes its retained home CPU copy, which tier_update never replaces.
+        t.shipped_sel = None if sel is None else np.asarray(sel, dtype=np.uint32)  # pick map (§17)
         entry = self._base_entry(t, pw, xv, yv, tier, self._default_styled(t))
         if tier == "decimated":
             # Record the px width this M4 pass was computed for (§28): the
@@ -649,14 +650,15 @@ class PayloadMixin(_Host):
     ) -> dict[str, Any]:
         if t.base is None:
             raise ValueError("area trace missing baseline column")
-        tier, (xv, yv, bv) = self._m4_decimate(
+        tier, (xv, yv, bv), sel = self._m4_decimate(
             t, xr, px_width, t.x.values, t.y.values, t.base.values
         )
-        sel = None
         if self._visible_mask_needed(t, prefiltered=False, base_column=t.base):
-            sel = np.flatnonzero(self._log_visible_mask(t, xv, yv, bv))
-            if len(sel) != len(xv):
-                xv, yv, bv = xv[sel], yv[sel], bv[sel]
+            keep = np.flatnonzero(self._log_visible_mask(t, xv, yv, bv))
+            if len(keep) != len(xv):
+                sel = keep if sel is None else sel[keep]
+                xv, yv, bv = xv[keep], yv[keep], bv[keep]
+        t.shipped_sel = None if sel is None else np.asarray(sel, dtype=np.uint32)  # pick map (§17)
         entry = self._base_entry(t, pw, xv, yv, tier, self._default_styled(t))
         if tier == "decimated":
             entry["decimation_px"] = int(px_width)

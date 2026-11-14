@@ -519,6 +519,11 @@ non-bool hidden) are dropped without mutating state.
   stale-predicate replies; drills ship only visible rows with canonical
   `shipped_sel`.
 
+**Line/area pick mapping.** M4-decimated and NaN-dropped line/area traces
+record `shipped_sel` (shipped vertex → canonical row) when the payload is built,
+exactly as scatter does. `pick` and `to_shipped_indices` translate through it,
+and a shipped index past the shipped vertex count resolves to nothing.
+
 **Accessibility compatibility exception.** Legend-hidden ordinary point-series
 rows remain in keyboard traversal in their full retained CPU order, so a screen
 reader can still inspect them and the announced `Point N of total` denominator

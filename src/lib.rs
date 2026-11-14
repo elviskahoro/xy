@@ -669,8 +669,9 @@ pub unsafe extern "C" fn xy_m4_indices(
 
 /// Fused M4 decimation for a parallel x/y pair. Unlike `xy_m4_indices`, this
 /// writes the selected values directly and avoids returning an index array for
-/// Python to gather through NumPy. SVG and PNG payload construction both use
-/// this entry point, so their common reduction path stays native.
+/// Python to gather through NumPy. Widget payload construction needs the index
+/// array (the shipped→canonical pick map), so it uses `xy_m4_indices`; this
+/// fused entry point is kept for ABI stability and kernel parity tests only.
 ///
 /// Returns the number of values written, or `usize::MAX` on invalid input.
 /// `out_x` and `out_y` must each hold `4 * n_buckets` f64 values.
