@@ -106,9 +106,18 @@ async def rebuild_plan_figure(app: Any, composite: ParsedPlanToken) -> Optional[
         columns = await rebuild_data(app, composite.data)
         if columns is None:
             return None
-        # Future binds (other plans over the same data var) hit the cache;
-        # bind_plan below is the subscribe path's job, not the rebuild's.
-        registry.publish_columns(composite.data_token, columns)
+        # A normal dependency-driven republish may have landed a fresher
+        # column generation while ``rebuild_data`` was awaiting user code.
+        # Insert conditionally under the registry mutex — the column-tier
+        # analog of ``publish_if_missing``: if a fresher entry won, use its
+        # columns instead of the stale rebuild's, so an older generation that
+        # finishes late can never overwrite a newer one (the registry's
+        # "Republish ordering" invariant). Future binds (other plans over
+        # the same data var) hit the cache; bind_plan below is the subscribe
+        # path's job, not the rebuild's, so no dependent fan-out here.
+        current = registry.publish_columns_if_absent(composite.data_token, columns)
+        if current is not None:
+            columns = current.columns
     # Same label the registry's republish path builds in _rebuild_dependent:
     # one mismatch, one err frame, whichever path hits it first.
     source = f"{composite.data.state_full_name}.{composite.data.var_name}"
