@@ -1056,14 +1056,19 @@ Object.assign(ChartView.prototype, {
       const yMeta = g._cpu.yMeta || g.yMeta;
       const ox = xMeta.offset, sx = xMeta.scale || 1;
       const oy = yMeta.offset, sy = yMeta.scale || 1;
+      // See _selectLocal: the mask index space is the current (filtered,
+      // gathered) vertex order, so iterate full shipped-order CPU rows and
+      // remap each match through `_visInv` to its filtered position.
+      const full = Math.min(cx.length, cy.length);
+      const inv = g._visInv;
       const mask = new Float32Array(g.n);
       let count = 0;
-      for (let i = 0; i < g.n; i++) {
+      for (let i = 0; i < full; i++) {
         const x = cx[i] / sx + ox;
         const y = cy[i] / sy + oy;
         if (x >= minX && x <= maxX && y >= minY && y <= maxY && inside(x, y)) {
-          mask[i] = 1;
-          count++;
+          const j = inv ? (i < inv.length ? inv[i] : -1) : i;
+          if (j >= 0 && j < g.n) { mask[j] = 1; count++; }
         }
       }
       this._applySelMask(g, mask);
@@ -1098,11 +1103,25 @@ Object.assign(ChartView.prototype, {
       const yMeta = g._cpu.yMeta || g.yMeta;
       const ox = xMeta.offset, sx = xMeta.scale || 1;
       const oy = yMeta.offset, sy = yMeta.scale || 1;
+      // The mask is a per-vertex attribute consumed by `gl.drawArrays(...,
+      // g.n)`, so its index space is the *current* (filtered, gathered)
+      // vertex order, not shipped order. After a legend category filter
+      // (`_filterScatterRows`), `g.n` is the visible count and `g._visInv`
+      // maps shipped row indices → filtered vertex positions. Iterate the
+      // full shipped-order CPU rows and write 1 at each match's filtered
+      // position, mirroring `_applySelectionBuffers` in 54_kernel.ts. When
+      // no filter is active `_visInv` is undefined and the identity path
+      // keeps the historical behavior.
+      const full = Math.min(cx.length, cy.length);
+      const inv = g._visInv;
       const mask = new Float32Array(g.n);
       let cnt = 0;
-      for (let i = 0; i < g.n; i++) {
+      for (let i = 0; i < full; i++) {
         const dx = cx[i] / sx + ox, dy = cy[i] / sy + oy;
-        if (dx >= x0 && dx <= x1 && dy >= y0 && dy <= y1) { mask[i] = 1; cnt++; }
+        if (dx >= x0 && dx <= x1 && dy >= y0 && dy <= y1) {
+          const j = inv ? (i < inv.length ? inv[i] : -1) : i;
+          if (j >= 0 && j < g.n) { mask[j] = 1; cnt++; }
+        }
       }
       this._applySelMask(g, mask);
       total += cnt;
