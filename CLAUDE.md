@@ -152,3 +152,11 @@ PRs, or code. Set `git config user.name/user.email` to the human author
   cache (§27). NaN never reaches vertex buffers (§19).
 - f32 uploads are offset-encoded; tick/hover math stays f64 (§4/§16).
 - Every decimation/tier decision is recorded in the spec, never silent (§28).
+
+## CI (RWX + Dagger)
+
+The Rust/lint/pytest core lives in `ci/main.py` (plain Dagger SDK, no module);
+`ci/run.sh rust|lint|test|all` runs it locally and `.rwx/tests.yml` runs it in
+RWX. The remaining jobs stay in `.github/workflows/ci.yml`. Dagger needs Docker
+and cannot run in Conductor cloud sandboxes — validate with
+`rwx run .rwx/tests.yml --wait`. See `ci/README.md`.

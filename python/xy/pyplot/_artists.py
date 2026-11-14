@@ -327,9 +327,7 @@ class Line2D(Artist):
         # zorder and removal must reach it too.
         # Only an overlay stamped by ``plot`` is owned; an adjacent scatter
         # the user drew separately is not.
-        return [
-            e for e in self._marker_entries() if e is not self._entry and e.get("_legend_skip")
-        ]
+        return [e for e in self._marker_entries() if e is not self._entry and e.get("_legend_skip")]
 
     def set_zorder(self, level: float) -> None:
         for entry in self._companion_entries():

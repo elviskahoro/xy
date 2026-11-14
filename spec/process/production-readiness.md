@@ -92,6 +92,16 @@ and this table together, then exercising the hosted gates. These controls cover
 CI/CodSpeed bootstrapping; hosted OS images and dependency-range installation
 smokes retain their existing update/support-range contracts.
 
+The `rust_checks` and `test` job checks are also packaged as a Dagger SDK
+program (`ci/main.py`; `ci/run.sh rust|lint|test|all`) that runs locally with
+only Docker and the `dagger` CLI, and in RWX through `.rwx/tests.yml` (status
+check `rwx-tests`). RWX is the only cache for that path: cached tool-install
+tasks plus a vault-scoped `tool-cache` that only main and the `cache-rebuild`
+trigger write. GitHub Actions stays authoritative for the required gates until
+the RWX check is proven green; the shared wheel, pyplot, browser, regression and
+conformance jobs have no RWX equivalent. Pins in `ci/main.py` must move with
+`ci.yml`. Details: `ci/README.md`.
+
 The runtime selection runs four independent blocking jobs:
 
 | Job | Dependencies | Checks |
