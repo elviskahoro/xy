@@ -1285,3 +1285,67 @@ def test_line_with_nan_x_sorts_and_excludes():
         offset=spec["columns"][tr["x"]]["byte_offset"],
     )
     assert not np.isnan(xbuf).any()  # §19: NaN never reaches a vertex buffer
+
+
+def test_pick_translates_shipped_index_on_decimated_line():
+    # M4 ships ~4 vertices/pixel column; shipped index i is NOT canonical row i.
+    n = 50_000
+    x = np.arange(n, dtype=np.float64)
+    fig = Figure().line(x, x.copy())
+    spec, _ = fig.build_payload(px_width=2048)
+    tr = spec["traces"][0]
+    assert tr["tier"] == "decimated"
+    sel = fig.traces[0].shipped_sel
+    assert sel is not None and len(sel) == tr["n_marks"] < n
+    row = fig.pick(0, 850)
+    assert row["index"] == int(sel[850]) != 850
+    assert row["x"] == float(sel[850])
+    assert fig.pick(0, tr["n_marks"]) is None  # past the shipped buffer
+
+
+def test_pick_translates_nan_drop_on_direct_line():
+    x = np.arange(5, dtype=np.float64)
+    y = np.array([1.0, np.nan, 3.0, 4.0, 5.0])
+    fig = Figure().line(x, y)
+    fig.build_payload()
+    assert fig.pick(0, 1)["index"] == 2
+    assert fig.pick(0, 4) is None
+
+
+def test_pick_translates_shipped_index_on_decimated_area_with_log_mask():
+    n = 50_000
+    x = np.arange(1, n + 1, dtype=np.float64)
+    y = x.copy()
+    y[100] = -1.0  # M4 keeps the min, then the log mask drops it
+    fig = Figure().area(x, y, base=1.0)
+    fig.set_axis("y", type_="log")
+    spec, _ = fig.build_payload(px_width=2048)
+    tr = spec["traces"][0]
+    assert tr["tier"] == "decimated"
+    sel = fig.traces[0].shipped_sel
+    assert sel is not None and len(sel) == tr["n_marks"]
+    row = fig.pick(0, 850)
+    assert row["index"] == int(sel[850]) != 850
+    assert 100 not in set(sel.tolist())
+    assert row["x"] == float(x[sel[850]])
+
+
+def test_pick_translates_nan_drop_on_line_before_payload_build():
+    x = np.arange(5, dtype=np.float64)
+    y = np.array([1.0, np.nan, 3.0, 4.0, 5.0])
+    fig = Figure().line(x, y)
+    assert fig.pick(0, 1)["index"] == 2
+    assert fig.pick(0, 4) is None
+
+
+def test_pick_after_decimate_view_still_uses_home_buffer_map():
+    # The client's hover reads its retained home CPU copy (tier_update replies
+    # never replace `_cpu`), so refinement must not change the pick map.
+    n = 50_000
+    x = np.arange(n, dtype=np.float64)
+    fig = Figure().line(x, x.copy())
+    fig.build_payload(px_width=2048)
+    sel = fig.traces[0].shipped_sel.copy()
+    fig.decimate_view(10_000, 20_000, 2048)
+    assert np.array_equal(fig.traces[0].shipped_sel, sel)
+    assert fig.pick(0, 850)["index"] == int(sel[850])
