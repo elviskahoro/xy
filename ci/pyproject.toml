@@ -1,0 +1,9 @@
+[project]
+name = "xy-ci"
+version = "0.0.0"
+description = "Dagger SDK program that runs this repo's CI checks locally and in RWX"
+requires-python = ">=3.11"
+dependencies = ["dagger-io==0.21.8"]
+
+[tool.uv]
+package = false
