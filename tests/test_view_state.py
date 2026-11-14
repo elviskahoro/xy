@@ -28,6 +28,15 @@ def _figure(**chart_kwargs):
     return chart.figure()
 
 
+def _polar_figure():
+    # Polar charts force the `select` interaction flag off universally
+    # (polar-axes.md §8), so the client never sends `select_clear` back to the
+    # kernel — the configuration the eager-record fix in clear_selection exists
+    # for. A small polar scatter stays under the polar direct-draw ceiling.
+    theta = np.linspace(0.0, 2.0 * math.pi, 10)
+    return xy.polar_chart(xy.scatter(theta, 1.0 + 0.5 * np.sin(5.0 * theta))).figure()
+
+
 def _dual_axis_figure():
     chart = xy.scatter_chart(
         xy.scatter(np.arange(10.0), np.arange(10.0)),
@@ -231,6 +240,47 @@ def test_view_state_tracks_selection_lifecycle() -> None:
     )
     assert fig.view_state()["selection"] == {"polygon": [[0.0, 0.0], [5.0, 0.0], [2.0, 5.0]]}
     handle_message(fig, {"type": "select_clear"})
+    assert fig.view_state()["selection"] is None
+
+
+def test_clear_selection_records_eagerly_when_select_flag_disabled() -> None:
+    # interaction.select=False suppresses the client's `select_clear` comm
+    # message (the only thing that fed the durable cache on a clear), while
+    # the select-SET echo still arrives (it is un-gated). Without an eager
+    # kernel-side record, view_state()['selection'] would stay frozen at the
+    # last range forever (the reported bug). The eager record keeps it None.
+    pytest.importorskip("anywidget")
+    from xy.channel import handle_message
+    from xy.widget import FigureWidget
+
+    fig = _figure(select=False)
+    assert fig._interaction_spec()["select"] is False
+    widget = FigureWidget(fig)
+    widget.send = lambda msg, buffers=None: None
+    handle_message(fig, {"type": "select", "x0": 2.0, "x1": 6.0, "y0": 0.0, "y1": 9.0})
+    assert fig.view_state()["selection"] == {"range": {"x0": 2.0, "x1": 6.0, "y0": 0.0, "y1": 9.0}}
+
+    widget.clear_selection()
+    assert fig.view_state()["selection"] is None
+
+
+def test_clear_selection_records_eagerly_on_polar_chart() -> None:
+    # coords="polar" forces the select interaction flag off for every polar
+    # chart (polar-axes.md §8), so the `select_clear` echo is always
+    # suppressed — the eager record is the only writer that keeps the kernel
+    # cache consistent on the clear path.
+    pytest.importorskip("anywidget")
+    from xy.channel import handle_message
+    from xy.widget import FigureWidget
+
+    fig = _polar_figure()
+    assert fig.coords == "polar"
+    widget = FigureWidget(fig)
+    widget.send = lambda msg, buffers=None: None
+    handle_message(fig, {"type": "select", "x0": 0.0, "x1": 1.0, "y0": 0.0, "y1": 2.0})
+    assert fig.view_state()["selection"] == {"range": {"x0": 0.0, "x1": 1.0, "y0": 0.0, "y1": 2.0}}
+
+    widget.clear_selection()
     assert fig.view_state()["selection"] is None
 
 
