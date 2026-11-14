@@ -83,7 +83,6 @@ pyramid_free = _impl.pyramid_free
 polygon_triangles = _impl.polygon_triangles
 quad_mesh_triangles = _impl.quad_mesh_triangles
 rasterize = _impl.rasterize
-rasterize_png = _impl.rasterize_png
 rfft = _impl.rfft
 spectrogram = _impl.spectrogram
 stratified_sample_mask = _impl.stratified_sample_mask
@@ -137,7 +136,6 @@ __all__ = [
     "range_indices",
     "range_indices_rows",
     "rasterize",
-    "rasterize_png",
     "remap_u8",
     "rfft",
     "sample_mask",
