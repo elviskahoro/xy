@@ -1,6 +1,7 @@
-# Rust + lint/typecheck + pytest. Layer C lives in ci/main.py (Dagger) and runs
-# identically on a laptop: ci/run.sh rust|lint|test|all. The GitHub Actions
-# workflow stays authoritative until this is green (see ci/README.md).
+# Rust + lint/typecheck/pre-commit + pytest + browser smokes. Layer C lives in
+# ci/main.py (Dagger) and runs identically on a laptop:
+# ci/run.sh rust|lint|test|smoke|all. It complements the GitHub Actions
+# workflow, which stays authoritative for required gates (see ci/README.md).
 on:
   github:
     pull_request:
@@ -93,7 +94,7 @@ tasks:
   - key: checks
     use: [code, uv-install, cache-dir, dagger-cli-install, dagger-engine-warm, dagger-sdk-install]
     docker: true
-    timeout: 60m
+    timeout: 90m
     cache: false
     tool-cache: xy-checks
     env:
