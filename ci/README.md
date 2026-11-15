@@ -16,9 +16,11 @@ Prereqs: Docker, `dagger` CLI 0.21.8, `uv`.
 
 `CI_CACHE_DIR` / `CI_CACHE_WRITE` are unset locally; Dagger uses its normal engine cache.
 
-Output: with `CI` set (RWX always sets `CI=true`) `run.sh` passes `dagger run --progress=plain`, so the log
-gets each step's output once instead of repainted TUI progress frames; locally it stays `auto` (the
-interactive TUI). `DAGGER_PROGRESS=auto|plain|tty|dots` overrides either way.
+Log output: without a TTY (RWX) `dagger run` already picks its plain, line-per-step output. The one step
+that flooded it was `playwright install --with-deps chromium` (~430 lines per browser check: apt-get output
+plus a download progress bar Playwright always prints, one line per 10%, when stdout isn't a TTY).
+`with_chromium` buffers that output and prints it only if the install fails; a success logs just the
+`downloaded to` lines.
 
 ## Layers
 | Layer | Where | What |
