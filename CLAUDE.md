@@ -156,7 +156,7 @@ PRs, or code. Set `git config user.name/user.email` to the human author
 ## CI (RWX + Dagger)
 
 The Rust/lint/pytest core lives in `ci/main.py` (plain Dagger SDK, no module);
-`ci/run.sh rust|lint|test|all` runs it locally and `.rwx/tests.yml` runs it in
+`ci/run.sh rust|lint|test|smoke|all` runs it locally and `.rwx/tests.yml` runs it in
 RWX. The remaining jobs stay in `.github/workflows/ci.yml`. Dagger needs Docker
 and cannot run in Conductor cloud sandboxes — validate with
 `rwx run .rwx/tests.yml --wait`. See `ci/README.md`.
