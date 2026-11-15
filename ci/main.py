@@ -169,11 +169,20 @@ def lint() -> dagger.Container:
     )
 
 
+# `pytest -q` still prints its progress: a row of dots and a `[ NN%]` counter
+# per 72 tests, ~70 rows for this suite. Drop rows that hold only passes,
+# skips and xfails; rows with an F or E, the failure details and the summary
+# stay. pipefail keeps pytest's exit status; `sed -u` keeps output live.
+PYTEST = (
+    f"XY_CHROMIUM=\"{CHROMIUM}\" .venv/bin/pytest -q | sed -u -E '/^[.sxX]+ *(\\[ *[0-9]+%\\])?$/d'"
+)
+
+
 def test() -> dagger.Container:
     return (
         with_chromium(git_indexed(synced()))
         .with_env_variable("XY_REQUIRE_BROWSER", "1")
-        .with_exec(["sh", "-c", f'XY_CHROMIUM="{CHROMIUM}" exec .venv/bin/pytest -q'])
+        .with_exec(["bash", "-o", "pipefail", "-c", PYTEST])
     )
 
 
