@@ -109,8 +109,19 @@ def git_indexed(ctr: dagger.Container) -> dagger.Container:
     return ctr.with_exec(["sh", "-c", "git init -q && git add -A"])
 
 
+# `playwright install --with-deps` writes ~430 lines per check: apt-get output
+# plus a download progress bar that Playwright always prints a line per 10%
+# when stdout isn't a TTY (no flag turns it off). Keep it out of the CI log
+# unless the install fails, then print all of it.
+INSTALL_CHROMIUM = (
+    'log="$(mktemp)"; '
+    'npx playwright install --with-deps chromium >"$log" 2>&1 || { s=$?; cat "$log"; exit "$s"; }; '
+    'grep "downloaded to" "$log" || echo "playwright: chromium already installed"'
+)
+
+
 def with_chromium(ctr: dagger.Container) -> dagger.Container:
-    return ctr.with_exec(["npx", "playwright", "install", "--with-deps", "chromium"]).with_exec(
+    return ctr.with_exec(["sh", "-c", INSTALL_CHROMIUM]).with_exec(
         [
             "node",
             "--input-type=module",
