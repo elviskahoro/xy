@@ -20,7 +20,8 @@ Log output: without a TTY (RWX) `dagger run` already picks its plain, line-per-s
 that flooded it was `playwright install --with-deps chromium` (~430 lines per browser check: apt-get output
 plus a download progress bar Playwright always prints, one line per 10%, when stdout isn't a TTY).
 `with_chromium` buffers that output and prints it only if the install fails; a success logs just the
-`downloaded to` lines.
+`downloaded to` lines. `test` also drops pytest's `-q` progress rows (dots plus a `[ NN%]` counter, ~70 rows)
+when they hold only passes, skips and xfails; rows with an `F`/`E`, the failure details and the summary stay.
 
 ## Layers
 | Layer | Where | What |
