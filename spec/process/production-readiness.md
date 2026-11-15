@@ -92,15 +92,28 @@ and this table together, then exercising the hosted gates. These controls cover
 CI/CodSpeed bootstrapping; hosted OS images and dependency-range installation
 smokes retain their existing update/support-range contracts.
 
-The `rust_checks` and `test` job checks are also packaged as a Dagger SDK
-program (`ci/main.py`; `ci/run.sh rust|lint|test|all`) that runs locally with
-only Docker and the `dagger` CLI, and in RWX through `.rwx/tests.yml` (status
-check `rwx-tests`). RWX is the only cache for that path: cached tool-install
-tasks plus a vault-scoped `tool-cache` that only main and the `cache-rebuild`
-trigger write. GitHub Actions stays authoritative for the required gates until
-the RWX check is proven green; the shared wheel, pyplot, browser, regression and
-conformance jobs have no RWX equivalent. Pins in `ci/main.py` must move with
-`ci.yml`. Details: `ci/README.md`.
+The `rust_checks`, `test` and `browser_smokes` job checks, plus the repository
+pre-commit hooks (Ruff and docs codespell), are also packaged as a Dagger SDK
+program (`ci/main.py`; `ci/run.sh rust|lint|test|smoke|all`). It runs locally
+with only Docker and the `dagger` CLI, and in RWX through `.rwx/tests.yml`
+(status check `rwx-tests`). Each run builds the native core from source with
+`XY_REQUIRE_CARGO=1` and runs the full pytest suite with
+`XY_REQUIRE_BROWSER=1`, so the headless-Chromium suites (for example
+`tests/test_shared_glhost.py`) are verified against a real WebGL2 context, not
+skipped. This gives one pass/fail for changes made where no Rust toolchain is
+available. The stdlib smokes run under a package-free venv to keep the
+no-numpy/no-PyPI contract. RWX is the only cache for that path: cached
+tool-install tasks plus a vault-scoped `tool-cache` that only main and the
+`cache-rebuild` trigger write. The cache holds the cargo registry and the uv,
+npm, Playwright and pre-commit caches, but not Rust `target/`.
+
+RWX complements GitHub Actions; it doesn't replace it. `ci.yml` stays
+authoritative for the required gates. The shared wheel, pyplot gallery,
+regression, conformance and docs jobs have no RWX equivalent. The release
+workflows stay owned by `reflex-release`. Retiring the mirrored `ci.yml` jobs
+needs a separate change after `rwx-tests` becomes a required check and has
+stayed green on `main`. Pins in `ci/main.py` must move with `ci.yml`. Details:
+`ci/README.md`.
 
 The runtime selection runs four independent blocking jobs:
 

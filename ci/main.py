@@ -1,8 +1,8 @@
 # pyright: reportMissingImports=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownParameterType=false, reportUnknownArgumentType=false
-"""Plain Dagger SDK program (no module). Usage: dagger run python ci/main.py <rust|lint|test|all>.
+"""Plain Dagger SDK program (no module). Usage: dagger run python ci/main.py <rust|lint|test|smoke|all>.
 
 Env knobs (all optional; unset locally):
-  CI_CACHE_DIR    host dir used to persist the cargo + uv caches between runs (RWX tool-cache)
+  CI_CACHE_DIR    host dir used to persist the CACHES below between runs (RWX tool-cache)
   CI_CACHE_WRITE  "true" to export those caches back to CI_CACHE_DIR after the run
 """
 
@@ -20,9 +20,19 @@ RUST_IMAGE = "rust:1.99.1-bookworm"
 NODE_IMAGE = "node:22.23.3-bookworm-slim"
 UV_IMAGE = "ghcr.io/astral-sh/uv:0.13.5"
 PYTHON = "3.12"  # ubuntu-24.04 system python, as ci.yml uses; ty fails on 3.11
-CARGO_HOME = "/usr/local/cargo"
 UV_CACHE = "/root/.cache/uv"
 CACHE_OUT = "/cache-out"
+# Persisted download caches: seed name -> (mount path, Dagger cache volume).
+# `npm ci` always recreates node_modules, so the npm cache is what pays off;
+# Rust target/ is not persisted (see ci/README.md).
+CACHES = {
+    "cargo": ("/usr/local/cargo/registry", "xy-cargo-registry"),
+    "uv": (UV_CACHE, "xy-uv"),
+    "npm": ("/root/.npm", "xy-npm"),
+    "playwright": ("/root/.cache/ms-playwright", "xy-playwright"),
+    "pre-commit": ("/root/.cache/pre-commit", "xy-pre-commit"),
+}
+CHROMIUM = "$(node -e \"console.log(require('playwright').chromium.executablePath())\")"
 
 
 def source() -> dagger.Directory:
@@ -55,19 +65,17 @@ def seed_dir(name: str) -> dagger.Directory | None:
 
 def base() -> dagger.Container:
     node = dag.container().from_(NODE_IMAGE)
-    return (
+    ctr = (
         dag.container()
         .from_(RUST_IMAGE)
         .with_directory("/usr/local/node", node.directory("/usr/local"))
         .with_env_variable("PATH", "/usr/local/node/bin:${PATH}", expand=True)
         .with_file("/usr/local/bin/uv", dag.container().from_(UV_IMAGE).file("/uv"))
-        .with_mounted_cache(
-            f"{CARGO_HOME}/registry",
-            dag.cache_volume("xy-cargo-registry"),
-            source=seed_dir("cargo"),
-        )
-        .with_mounted_cache(UV_CACHE, dag.cache_volume("xy-uv"), source=seed_dir("uv"))
-        .with_env_variable("UV_LINK_MODE", "copy")
+    )
+    for name, (path, volume) in CACHES.items():
+        ctr = ctr.with_mounted_cache(path, dag.cache_volume(volume), source=seed_dir(name))
+    return (
+        ctr.with_env_variable("UV_LINK_MODE", "copy")
         .with_env_variable("UV_PYTHON", PYTHON)
         .with_env_variable("UV_PYTHON_INSTALL_DIR", f"{UV_CACHE}/python")
         .with_env_variable("XY_REQUIRE_CARGO", "1")
@@ -95,8 +103,27 @@ def synced() -> dagger.Container:
     )
 
 
+def git_indexed(ctr: dagger.Container) -> dagger.Container:
+    # pre-commit and some tests call `git ls-files`; .git isn't uploaded, so
+    # index the tree (honoring .gitignore) after the package build has run.
+    return ctr.with_exec(["sh", "-c", "git init -q && git add -A"])
+
+
+def with_chromium(ctr: dagger.Container) -> dagger.Container:
+    return ctr.with_exec(["npx", "playwright", "install", "--with-deps", "chromium"]).with_exec(
+        [
+            "node",
+            "--input-type=module",
+            "-e",
+            "import { chromium } from 'playwright';"
+            "const b = await chromium.launch({executablePath: chromium.executablePath()});"
+            "await b.close();",
+        ]
+    )
+
+
 def lint() -> dagger.Container:
-    return (
+    checked = (
         synced()
         .with_exec([".venv/bin/python", "scripts/check_python_floor.py"])
         .with_exec([".venv/bin/python", "scripts/verify_ci_workflow.py"])
@@ -112,43 +139,74 @@ def lint() -> dagger.Container:
         .with_exec([".venv/bin/ruff", "format", "--check", "."])
         .with_exec([".venv/bin/python", "scripts/check_public_api.py"])
         .with_exec([".venv/bin/python", "scripts/check_typing.py"])
+        # The repository hooks (ruff + docs codespell). Their entry points run
+        # from the docs app's dev group; --only-group skips the Reflex site deps.
+        .with_exec(["uv", "sync", "--project", "docs/app", "--frozen", "--only-group", "dev"])
+    )
+    return git_indexed(checked).with_exec(
+        [
+            "uv",
+            "run",
+            "--project",
+            "docs/app",
+            "--no-sync",
+            "pre-commit",
+            "run",
+            "--all-files",
+            "--show-diff-on-failure",
+        ]
     )
 
 
 def test() -> dagger.Container:
     return (
-        synced()
-        # Some tests call `git ls-files`; .git isn't uploaded, so index the
-        # tree (honoring .gitignore) after the package build has run.
-        .with_exec(["sh", "-c", "git init -q && git add -A"])
-        .with_exec(["npx", "playwright", "install", "--with-deps", "chromium"])
+        with_chromium(git_indexed(synced()))
         .with_env_variable("XY_REQUIRE_BROWSER", "1")
-        .with_exec(
-            [
-                "sh",
-                "-c",
-                'XY_CHROMIUM="$(node -e "console.log(require(\'playwright\').chromium.executablePath())")" '
-                "exec .venv/bin/pytest -q",
-            ]
-        )
+        .with_exec(["sh", "-c", f'XY_CHROMIUM="{CHROMIUM}" exec .venv/bin/pytest -q'])
     )
 
 
-CHECKS = {"rust": rust, "lint": lint, "test": test}
+# The `browser_smokes` job of ci.yml, minus its scope-gated pyplot pytest subset
+# (already covered by `test`, which runs the whole suite with XY_REQUIRE_BROWSER).
+# The stdlib smokes run under a package-free venv ($BARE), as ci.yml runs them
+# before installing anything, so they keep proving the no-numpy/no-PyPI path.
+BARE = "/tmp/bare/bin/python"
+SMOKES = [
+    "node -e \"import('./python/xy/static/index.js').then(m => { if (!m.default.render) throw new Error('no render export'); })\"",
+    "node --check python/xy/static/standalone.js",
+    "$BARE scripts/abi_smoke.py",
+    '$BARE scripts/render_smoke_nonumpy.py "$CHROME"',
+    '$BARE scripts/polar_parity_smoke.py "$CHROME"',
+    '$BARE scripts/append_stream_smoke.py "$CHROME"',
+    'XY_CHROMIUM="$CHROME" $BARE scripts/png_export_smoke.py',
+    '.venv/bin/python scripts/smoke_render.py "$CHROME"',
+    '.venv/bin/python scripts/polar_phase7_smoke.py "$CHROME"',
+    '.venv/bin/python scripts/reflex_lifecycle_smoke.py "$CHROME"',
+    '.venv/bin/python scripts/visual_regression_smoke.py "$CHROME"',
+    '.venv/bin/python scripts/step_tier_smoke.py "$CHROME"',
+    '.venv/bin/python scripts/interaction_stress_smoke.py "$CHROME"',
+    ".venv/bin/python benchmarks/bench_dashboard.py --chart-counts 10,20,50,60"
+    ' --chromium "$CHROME" --json /tmp/dashboard-smoke.json',
+    ".venv/bin/python scripts/verify_benchmark_report.py /tmp/dashboard-smoke.json --kind dashboard-browser",
+]
+
+
+def smoke() -> dagger.Container:
+    ctr = with_chromium(synced()).with_exec(["uv", "venv", "-q", "/tmp/bare"])
+    for cmd in SMOKES:
+        ctr = ctr.with_exec(["sh", "-c", f'set -e; BARE={BARE}; CHROME="{CHROMIUM}"; {cmd}'])
+    return ctr
+
+
+CHECKS = {"rust": rust, "lint": lint, "test": test, "smoke": smoke}
 
 
 async def export_caches() -> None:
     # A fresh container mounting the same cache volumes, so a failed check
     # still persists what it downloaded.
     cache_dir = os.environ["CI_CACHE_DIR"]
-    ctr = base().with_exec(
-        [
-            "sh",
-            "-c",
-            f"rm -rf {CACHE_OUT} && mkdir -p {CACHE_OUT} && "
-            f"cp -a {CARGO_HOME}/registry {CACHE_OUT}/cargo && cp -a {UV_CACHE} {CACHE_OUT}/uv",
-        ]
-    )
+    copies = " && ".join(f"cp -a {path} {CACHE_OUT}/{name}" for name, (path, _) in CACHES.items())
+    ctr = base().with_exec(["sh", "-c", f"rm -rf {CACHE_OUT} && mkdir -p {CACHE_OUT} && {copies}"])
     await ctr.directory(CACHE_OUT).export(cache_dir)
 
 
