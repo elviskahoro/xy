@@ -162,7 +162,7 @@ def test() -> dagger.Container:
     return (
         with_chromium(git_indexed(synced()))
         .with_env_variable("XY_REQUIRE_BROWSER", "1")
-        .with_exec(["sh", "-c", f'XY_CHROMIUM="{CHROMIUM}" exec .venv/bin/pytest -q'])
+        .with_exec(["sh", "-c", f'XY_CHROMIUM="{CHROMIUM}" exec .venv/bin/pytest -q -rs'])
     )
 
 

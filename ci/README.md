@@ -9,7 +9,7 @@ Prereqs: Docker, `dagger` CLI 0.21.8, `uv`.
     ci/run.sh rust    # cargo test + clippy -D warnings
     ci/run.sh lint    # py3.11 floor syntax, CI workflow gate wiring, reflex_xy import, ruff, public API, ty,
                       # pre-commit --all-files (ruff hooks + docs codespell)
-    ci/run.sh test    # full pytest with Playwright Chromium (XY_REQUIRE_BROWSER=1)
+    ci/run.sh test    # full pytest with Playwright Chromium (XY_REQUIRE_BROWSER=1); -rs names every skip
     ci/run.sh smoke   # browser_smokes job: JS parse, stdlib ABI/render/polar/append/PNG smokes (package-free
                       # venv), then numpy/Reflex render, lifecycle, visual, step-tier, stress, dashboard smokes
     ci/run.sh all     # rust, lint, test, smoke in order; stops at the first failure

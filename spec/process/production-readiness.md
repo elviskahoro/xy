@@ -100,7 +100,8 @@ with only Docker and the `dagger` CLI, and in RWX through `.rwx/tests.yml`
 `XY_REQUIRE_CARGO=1` and runs the full pytest suite with
 `XY_REQUIRE_BROWSER=1`, so the headless-Chromium suites (for example
 `tests/test_shared_glhost.py`) are verified against a real WebGL2 context, not
-skipped. This gives one pass/fail for changes made where no Rust toolchain is
+skipped. pytest runs with `-rs`, so the log names each remaining skip and its
+reason. This gives one pass/fail for changes made where no Rust toolchain is
 available. The stdlib smokes run under a package-free venv to keep the
 no-numpy/no-PyPI contract. RWX is the only cache for that path: cached
 tool-install tasks plus a vault-scoped `tool-cache` that only main and the
