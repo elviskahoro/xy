@@ -13,6 +13,10 @@ Prereqs: Docker, `dagger` CLI 0.21.8, `uv`.
 
 `CI_CACHE_DIR` / `CI_CACHE_WRITE` are unset locally; Dagger uses its normal engine cache.
 
+Output: with `CI` set (RWX always sets `CI=true`) `run.sh` passes `dagger run --progress=plain`, so the log
+gets each step's output once instead of repainted TUI progress frames; locally it stays `auto` (the
+interactive TUI). `DAGGER_PROGRESS=auto|plain|tty|dots` overrides either way.
+
 ## Layers
 | Layer | Where | What |
 |---|---|---|
